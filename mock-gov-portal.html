@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Mock Gov Portal</title>
+</head>
+
+<body>
+    <h2>Yojana-Setu Document Submission</h2>
+
+    <div id="form-container">
+        <label>Name:</label>
+        <input type="text" id="applicant-name"><br><br>
+
+        <label>Document ID:</label>
+        <input type="text" id="document-id"><br><br>
+
+        <label>Upload File:</label>
+        <input type="file" id="file-upload-input"><br><br>
+
+        <button id="submit-button" onclick="submitForm()">Submit</button>
+    </div>
+
+    <div id="success-message" style="display:none; color: green; margin-top: 20px;">
+        <strong>Application ID #99812 Submitted Successfully</strong>
+    </div>
+
+    <script>
+        function submitForm() {
+            // Simulates a tiny network delay, then shows the success message
+            setTimeout(() => {
+                document.getElementById("form-container").style.display = "none";
+                document.getElementById("success-message").style.display = "block";
+            }, 800);
+        }
+    </script>
+</body>
+
+</html>
