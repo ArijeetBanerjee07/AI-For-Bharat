@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+boto3
+python-dotenv
+python-multipart
+requests
+httpx
+chromadb
+sentence-transformers
+torch
+langchain-text-splitters
+pydantic
+sarvamai
+playwright
+

@@ -1,17 +1,21 @@
 import os
 import re
 import asyncio
+import subprocess
+import sys
 import zipfile
 import io
 import json
+import tempfile
 import httpx
-from playwright.async_api import async_playwright
+from playwright.sync_api import sync_playwright
 from sarvamai import SarvamAI
 from dotenv import load_dotenv
 
 load_dotenv()
 
 sarvam_client = SarvamAI(api_subscription_key=os.getenv("SARVAM_API_KEY"))
+
 
 async def validate_document_with_sarvam(file_path: str, expected_doc_type: str):
     try:
@@ -108,36 +112,213 @@ async def validate_document_with_sarvam(file_path: str, expected_doc_type: str):
     except Exception as e:
         return {"is_valid": False, "error": str(e)}
 
-async def submit_to_portal_agent(user_data: dict, file_path: str, portal_url: str = "http://localhost:8000/mock-gov-portal"):
-    """
-    The 'Action Agent': Opens a hidden browser, fills the form, and submits.
-    """
-    async with async_playwright() as p:
-        # headless=True means the browser runs invisibly in the background
-        browser = await p.chromium.launch(headless=True) 
-        page = await browser.new_page()
+
+# ---------------------------------------------------------------------------
+# Playwright Script (runs as a SEPARATE PROCESS to avoid Windows event loop issues)
+# ---------------------------------------------------------------------------
+_PLAYWRIGHT_SCRIPT = '''
+import sys, json, os, traceback
+
+# Ensure Windows Proactor Loop for subprocess stability
+if os.name == 'nt':
+    import asyncio
+    try:
+        from asyncio import WindowsProactorEventLoopPolicy
+        asyncio.set_event_loop_policy(WindowsProactorEventLoopPolicy())
+    except ImportError:
+        pass
+
+# Read data from the temp JSON file
+try:
+    with open("_temp_portal_data.json", "r", encoding="utf-8") as f:
+        data = json.load(f)
+except Exception as e:
+    print(json.dumps({"status": "error", "message": f"Failed to read payload: {str(e)}"}))
+    sys.exit(1)
+
+user_data = data["user_data"]
+file_path = data["file_path"]
+portal_url = data["portal_url"]
+mock_portal_url = data.get("mock_portal_url")
+
+try:
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        # Use a slightly longer timeout for launch
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        page = context.new_page()
         
+        # Set a default timeout for all actions
+        page.set_default_timeout(15000)
+        
+        target_url = portal_url
+        if "/mock-gov-portal" in portal_url and mock_portal_url:
+            target_url = mock_portal_url
+            print(json.dumps({"debug": "Redirecting to mock: " + target_url}), file=sys.stderr)
+        
+        print(json.dumps({"debug": "Navigating to " + target_url}), file=sys.stderr)
+        page.goto(target_url, wait_until="domcontentloaded")
+        
+        print(json.dumps({"debug": "Filling form fields..."}), file=sys.stderr)
+        page.wait_for_selector("#applicant-name", state="visible")
+        page.fill("#applicant-name", user_data.get("name", "Citizen"))
+        
+        page.wait_for_selector("#document-id", state="visible")
+        page.fill("#document-id", user_data.get("extracted_id", ""))
+        
+        # Only upload file if it exists
+        if file_path and os.path.exists(file_path):
+            print(json.dumps({"debug": "Uploading file: " + file_path}), file=sys.stderr)
+            page.set_input_files("#file-upload-input", file_path)
+        
+        print(json.dumps({"debug": "Clicking submit..."}), file=sys.stderr)
+        page.click("#submit-button")
+        
+        # Wait for success message
+        print(json.dumps({"debug": "Waiting for success message..."}), file=sys.stderr)
+        page.wait_for_selector("#success-message", state="visible", timeout=10000)
+        success_text = page.locator("#success-message").inner_text()
+        
+        browser.close()
+        # Ensure the JSON is the ONLY thing on the last line of stdout
+        print(json.dumps({"status": "success", "message": success_text}))
+except Exception as e:
+    print(json.dumps({
+        "status": "error", 
+        "message": f"Portal submission failed: {str(e)}",
+        "trace": traceback.format_exc()
+    }))
+    sys.exit(1)
+'''
+
+
+async def submit_to_portal_agent(user_data: dict, file_path: str, portal_url: str = "http://127.0.0.1:8000/mock-gov-portal"):
+    """
+    The 'Action Agent': Runs Playwright in a completely separate Python process.
+    Uses tempfile to avoid triggering uvicorn reloads on file changes.
+    """
+    import tempfile
+    print(f"📦 Preparing Playwright payload...")
+    
+    # Files to cleanup later
+    to_delete = []
+    
+    try:
+        # 1. Use system temp directory to prevent Uvicorn --reload from seeing file changes
+        temp_dir = tempfile.gettempdir()
+        data_file = os.path.join(temp_dir, f"portal_data_{os.getpid()}.json")
+        script_file = os.path.join(temp_dir, f"playwright_runner_{os.getpid()}.py")
+        
+        to_delete.extend([data_file, script_file])
+        
+        # Pre-format paths
+        abs_file_path = os.path.abspath(file_path).replace("\\", "/") if file_path else ""
+        abs_portal_path = os.path.abspath("mock-gov-portal.html").replace("\\", "/")
+        
+        payload_dict = {
+            "user_data": user_data,
+            "file_path": abs_file_path,
+            "portal_url": portal_url,
+            "mock_portal_url": "file:///" + abs_portal_path,
+            "data_file": data_file # Tell the script where its own data is
+        }
+        
+        # Write payload
+        with open(data_file, "w", encoding="utf-8") as f:
+            json.dump(payload_dict, f)
+        
+        # Update script to read from the dynamic data_file path
+        dynamic_script = _PLAYWRIGHT_SCRIPT.replace('_temp_portal_data.json', data_file.replace("\\", "\\\\"))
+        
+        # Write runner script
+        with open(script_file, "w", encoding="utf-8") as f:
+            f.write(dynamic_script)
+        
+        def run_sync_subprocess():
+            import subprocess
+            
+            # Determine best python executable (.venv is preferred)
+            python_exe = sys.executable
+            venv_python = os.path.join(os.getcwd(), ".venv", "Scripts", "python.exe")
+            if os.name != 'nt':
+                venv_python = os.path.join(os.getcwd(), ".venv", "bin", "python")
+                
+            if os.path.exists(venv_python):
+                python_exe = venv_python
+                print(f"🐍 Using VENV python: {python_exe}")
+            
+            cmd = [python_exe, script_file]
+            print(f"🚀 Executing Playwright runner...")
+            
+            return subprocess.run(
+                cmd,
+                capture_output=True, 
+                text=True, 
+                timeout=60,
+                shell=False,
+                cwd=os.getcwd(),
+                env=os.environ.copy()
+            )
+
+        print(f"🌐 Launching Playwright subprocess...")
+        proc = await asyncio.to_thread(run_sync_subprocess)
+        
+        stdout_output = proc.stdout.strip()
+        stderr_output = proc.stderr.strip()
+        
+        if stderr_output:
+            print(f"🔍 Playwright stderr:\n{stderr_output}")
+        
+        if proc.returncode != 0:
+            print(f"❌ Playwright subprocess failed (exit code {proc.returncode})")
+            # Try to parse error from stdout if it's JSON
+            try:
+                # Find last line that looks like JSON
+                last_line = stdout_output.splitlines()[-1] if stdout_output else ""
+                if last_line.strip().startswith("{") and last_line.strip().endswith("}"):
+                    return json.loads(last_line)
+            except:
+                pass
+            return {"status": "error", "message": f"Portal submission failed (code {proc.returncode}). Check server logs for details."}
+        
+        if not stdout_output:
+            return {"status": "error", "message": "Portal submission failed: No output from subprocess"}
+        
+        # Extract JSON from stdout - sometimes extra output gets mixed in
         try:
-            # 1. Navigate to the target portal
-            await page.goto(portal_url) 
+            # Find the last JSON block in stdout
+            lines = stdout_output.splitlines()
+            for line in reversed(lines):
+                line = line.strip()
+                if line.startswith("{") and line.endswith("}"):
+                    result = json.loads(line)
+                    print(f"✅ Playwright result: {result}")
+                    return result
             
-            # 2. Fill out the form fields using CSS selectors
-            await page.fill("#applicant-name", user_data.get("name", "Citizen"))
-            await page.fill("#document-id", user_data.get("extracted_id", ""))
-            
-            # 3. Upload the document
-            await page.set_input_files("#file-upload-input", file_path)
-            
-            # 4. Click Submit
-            await page.click("#submit-button")
-            
-            # 5. Wait for the success message to appear on the screen and scrape it
-            await page.wait_for_selector("#success-message", timeout=5000)
-            success_text = await page.locator("#success-message").inner_text()
-            
-            return {"status": "success", "message": success_text}
-            
+            # If no line is pure JSON, try searching the whole string
+            import re
+            json_match = re.search(r'(\{.*?\})', stdout_output.replace('\n', ' '))
+            if json_match:
+                result = json.loads(json_match.group(1))
+                return result
+                
+            raise ValueError("No JSON found in output")
         except Exception as e:
-            return {"status": "error", "message": f"Portal submission failed: {str(e)}"}
-        finally:
-            await browser.close()
+            print(f"⚠️ Failed to parse Playwright output: {stdout_output}")
+            return {"status": "error", "message": f"Failed to parse portal response: {str(e)}"}
+            
+    except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"🔥 UNEXPECTED AGENT ERROR: {repr(e)}\n{error_trace}")
+        return {"status": "error", "message": f"Portal submission failed: {repr(e)}", "trace": error_trace}
+    finally:
+        # Cleanup temp files
+        for p in to_delete:
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except:
+                    pass
+

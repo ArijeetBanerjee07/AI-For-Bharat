@@ -7,13 +7,33 @@ load_dotenv()
 
 class AgentService:
     def __init__(self):
-        # Using Sarvam AI for India-specific LLM support
-        self.api_key = os.getenv('SARVAM_API_KEY')
-        self.api_url = "https://api.sarvam.ai/v1/chat/completions" # Fixed URL
+        # Bedrock Configuration
+        self.primary_region = os.getenv('AWS_REGION', 'ap-south-1')
+        self.secondary_region = 'us-east-1' # Better model availability for fallbacks
+        self.model_id = os.getenv('BEDROCK_MODEL_ID', 'anthropic.claude-3-5-sonnet-20241022-v2:0')
+        
+        # AWS Credentials
+        aws_access_key = os.getenv('AWS_ACCESS_KEY_ID')
+        aws_secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+
+        # Clients for different regions to ensure high availability
+        self.primary_client = boto3.client(
+            service_name='bedrock-runtime',
+            region_name=self.primary_region,
+            aws_access_key_id=aws_access_key,
+            aws_secret_access_key=aws_secret_key
+        )
+        
+        self.secondary_client = boto3.client(
+            service_name='bedrock-runtime',
+            region_name=self.secondary_region,
+            aws_access_key_id=aws_access_key,
+            aws_secret_access_key=aws_secret_key
+        )
 
     def chat(self, user_message, conversation_history=[], user_profile={}):
         """
-        AI Interaction using Sarvam AI (Best for India)
+        AI Interaction using Amazon Bedrock (Amazon Nova Lite / Micro Fallback)
         """
         SCHEME_REQUIREMENTS = {
             "PM Awas Yojana": ["aadhar", "income", "land_status"],
@@ -45,103 +65,54 @@ class AgentService:
         5. Tone: Polite, caseworker-like, and efficient.
         """
 
-        # Convert conversation history to Sarvam/OpenAI format
-        messages = [{"role": "system", "content": system_prompt}]
-        
-        # Sarvam/OpenAI requires the first message after system to be 'user'
-        # Our UI starts with an assistant greeting, so we skip it in the history
-        active_history = []
+        # Convert conversation history
+        messages = []
         for msg in conversation_history:
             role = msg.get('role')
             content = msg.get('content')
-            
-            # Handle list-based content from Bedrock history if it exists
-            if isinstance(content, list):
-                content = content[0].get('text', '')
-            
-            if not active_history and role == 'assistant':
-                continue # Skip leading assistant messages
-            
-            active_history.append({"role": role, "content": content})
-            
-        messages.extend(active_history)
-        messages.append({"role": "user", "content": user_message})
+            if role not in ['user', 'assistant']: continue
+            if isinstance(content, str): content_blocks = [{"text": content}]
+            elif isinstance(content, list): content_blocks = content if content and 'text' in content[0] else [{"text": str(content)}]
+            else: content_blocks = [{"text": str(content)}]
+            messages.append({"role": role, "content": content_blocks})
 
-        try:
-            print(f"--- Calling Sarvam AI at {self.api_url} ---")
-            import requests
-            headers = {
-                "api-subscription-key": self.api_key,
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": "sarvam-m", 
-                "messages": messages,
-                "temperature": 0.7
-            }
-            
-            response = requests.post(self.api_url, headers=headers, json=payload)
-            if response.status_code != 200:
-                print(f"!!! Sarvam Error Details: {response.text}")
-                response.raise_for_status()
-                
-            return response.json()['choices'][0]['message']['content']
-            
-        except Exception as e:
-            print(f"!!! Sarvam AI Exception: {str(e)}")
-            return "Maaf kijiye, hamare AI system mein thodi takleef ho rahi hai. Kripya thodi der baad koshish karein."
+        messages.append({"role": "user", "content": [{"text": user_message}]})
 
+        # --- Nova Fallback Strategy ---
+        # Prioritize the configured ID (apac.amazon.nova-lite-v1:0)
+        model_options = [
+            self.model_id,
+            "apac.amazon.nova-lite-v1:0",
+            "apac.amazon.nova-micro-v1:0",
+            "amazon.nova-lite-v1:0",
+            "amazon.nova-micro-v1:0"
+        ]
 
-        # Strategy 1.5: Explicit v2 Check (in case .env is old)
-        v2_id = "anthropic.claude-3-5-sonnet-20241022-v2:0"
-        if self.model_id != v2_id:
-            print(f"--- Attempting Explicit v2: {v2_id} ---")
-            response = self._try_model(self.primary_client, v2_id, messages, system_prompt)
+        # Filter duplicates while preserving order
+        seen = set()
+        unique_models = [x for x in model_options if not (x in seen or seen.add(x))]
+
+        for m_id in unique_models:
+            print(f"--- Calling Bedrock: {m_id} ---")
+            response = self._try_model(self.primary_client, m_id, messages, system_prompt)
             if response: return response
 
-        # Strategy 2: Cross-Region Inference Profiles (often avoids marketplace locks)
-        # Using US and EU inference profiles
-        for profile_id in ["us.anthropic.claude-3-5-sonnet-20240620-v1:0", "eu.anthropic.claude-3-5-sonnet-20240620-v1:0"]:
-            print(f"--- Attempting Inference Profile: {profile_id} ---")
-            response = self._try_model(self.primary_client, profile_id, messages, system_prompt)
-            if response: return response
-
-        # Strategy 3: Secondary Region (US-East-1) - Direct Model Access
-        print(f"--- Attempting Secondary Region: {self.secondary_region} ---")
-        response = self._try_model(self.secondary_client, self.model_id, messages, system_prompt)
-        if response: return response
-
-        # Strategy 3.5: Primary Region + Claude 3 Haiku (Very cheap, usually high quota)
-        haiku_id = "anthropic.claude-3-haiku-20240307-v1:0"
-        print(f"--- Attempting Haiku Fallback: {haiku_id} ---")
-        response = self._try_model(self.primary_client, haiku_id, messages, system_prompt)
-        if response: return response + "\n\n(Note: Running on Haiku model)"
-
-        # Strategy 4: Fallback to Llama 3 (Meta) - usually has fewer restrictions
-        fallback_id = "meta.llama3-8b-instruct-v1:0"
-        print(f"--- Final Fallback to {fallback_id} in {self.primary_region} ---")
-        response = self._try_model(self.primary_client, fallback_id, messages, system_prompt)
-        if response: return response + "\n\n(Note: Running on Mumbai Fallback)"
-
-        # Strategy 5: US-East-1 Llama 3 Fallback (Higher Quota)
-        print(f"--- Final Fallback to {fallback_id} in {self.secondary_region} ---")
-        response = self._try_model(self.secondary_client, fallback_id, messages, system_prompt)
-        if response: return response + "\n\n(Note: Running on US Fallback)"
-
-        return "Service unavailable. Please ensure you have requested model access in AWS Bedrock Console for Claude or Llama 3 and check your AWS Billing dashboard."
+        return "Maaf kijiye, hamare AI system mein thodi takleef ho rahi hai. Kripya thodi der baad koshish karein. (Nova Service Busy)"
 
     def _try_model(self, client, model_id, messages, system):
+        """
+        Helper to try a specific Bedrock model with the Converse API.
+        """
         try:
             response = client.converse(
                 modelId=model_id,
                 messages=messages,
                 system=[{"text": system}],
-                inferenceConfig={'maxTokens': 500, 'temperature': 0.7}
+                inferenceConfig={'maxTokens': 1000, 'temperature': 0.7}
             )
             return response['output']['message']['content'][0]['text']
         except Exception as e:
-            error_msg = str(e).lower()
-            print(f"Model {model_id} failed: {str(e)}")
+            print(f"!!! Bedrock {model_id} failed: {str(e)}")
             return None
 
     def apply_for_scheme(self, user_phone, scheme_name, user_info):
@@ -149,7 +120,6 @@ class AgentService:
         Mock function to 'Apply' for a scheme on behalf of the user.
         In a real scenario, this would call a government API or fill a form.
         """
-        # Logic to submit data to DynamoDB or another service
         application_id = f"APP-{os.urandom(4).hex().upper()}"
         print(f"Applying for {scheme_name} for user {user_phone}...")
         return {
@@ -157,3 +127,4 @@ class AgentService:
             "application_id": application_id,
             "message": f"Aapka {scheme_name} ke liye aavedan (application) submit ho gaya hai. Reference ID: {application_id}"
         }
+

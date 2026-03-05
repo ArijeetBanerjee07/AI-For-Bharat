@@ -17,11 +17,8 @@ export default function Dashboard() {
   const [userPhone, setUserPhone] = useState<string | null>(null);
   const router = useRouter();
 
-  // Mock applications - in a real app, these would come from DynamoDB
-  const [applications] = useState<Application[]>([
-    { id: '1', scheme: 'PM Awas Yojana', status: 'In Review', date: '03 March 2026', beneficiary: 'Arijeet Banerjee' },
-    { id: '2', scheme: 'Ladli Behna Yojana', status: 'Submitted', date: '02 March 2026', beneficiary: 'Family Member' },
-  ]);
+  // Empty applications state
+  const [applications] = useState<Application[]>([]);
 
   useEffect(() => {
     const name = localStorage.getItem('user_name');
@@ -122,22 +119,12 @@ export default function Dashboard() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {applications.map(app => (
-              <div key={app.id} className="p-6 bg-slate-50 rounded-3xl border border-slate-100 hover:border-blue-200 transition-all shadow-sm">
-                <div className="flex justify-between items-start mb-4">
-                  <span className={`px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest ${app.status === 'In Review' ? 'bg-orange-100 text-[#FF9933]' : 'bg-green-100 text-[#138808]'}`}>
-                    {app.status}
-                  </span>
-                  <span className="text-[10px] text-slate-400 font-bold">{app.date}</span>
-                </div>
-                <h4 className="text-lg font-black text-slate-800 mb-1">{app.scheme}</h4>
-                <p className="text-xs text-slate-500 font-medium mb-4">Ref ID: YS-{app.id}09283-IND</p>
-                <div className="pt-4 border-t border-slate-200 flex items-center gap-2">
-                  <div className="w-6 h-6 bg-blue-100 rounded-full flex items-center justify-center text-[10px]">👤</div>
-                  <span className="text-[10px] font-bold text-slate-600 uppercase tracking-wider">Applied for: {app.beneficiary}</span>
-                </div>
-              </div>
-            ))}
+            <div className="col-span-full py-12 flex flex-col items-center justify-center border-2 border-dashed border-slate-100 rounded-[2rem] bg-slate-50/30">
+              <p className="text-slate-400 font-bold text-sm tracking-tight text-center px-4">
+                Abhi tak koi application nahi hai. 🇮🇳<br />
+                <span className="text-xs font-medium opacity-70">No active applications found. Access 'Apka Sathi' to apply.</span>
+              </p>
+            </div>
           </div>
         </div>
       </main>

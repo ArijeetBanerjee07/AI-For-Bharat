@@ -9,12 +9,19 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from submission_agent import validate_document_with_sarvam, submit_to_portal_agent
 import shutil
+import uuid
+import asyncio
+import re
 
 import chromadb
 from sarvamai import SarvamAI
 from sentence_transformers import SentenceTransformer, CrossEncoder
+from backend.storage_service import StorageService
 
 load_dotenv()
+
+# Initialize DynamoDB storage service (used by /register and /login)
+storage_service = StorageService()
 
 app = FastAPI(title="Yojana-Setu Phygital Backend")
 sarvam_client = SarvamAI(api_subscription_key=os.getenv("SARVAM_API_KEY"))
@@ -34,25 +41,25 @@ SCHEME_REGISTRY = {
     "pmay-g": {
         "name": "Pradhan Mantri Awaas Yojana - Gramin (PMAY-G)",
         "required_docs": ["aadhar"],
-        "portal_url": "http://localhost:8000/mock-gov-portal",
+        "portal_url": "http://127.0.0.1:8000/mock-gov-portal",
         "description": "Housing scheme for rural areas"
     },
     "pmay-u": {
         "name": "Pradhan Mantri Awaas Yojana - Urban (PMAY-U)",
         "required_docs": ["aadhar"],
-        "portal_url": "http://localhost:8000/mock-gov-portal",
+        "portal_url": "http://127.0.0.1:8000/mock-gov-portal",
         "description": "Housing scheme for urban areas"
     },
     "pmjdy": {
         "name": "Pradhan Mantri Jan Dhan Yojana (PMJDY)",
         "required_docs": ["aadhar"],
-        "portal_url": "http://localhost:8000/mock-gov-portal",
+        "portal_url": "http://127.0.0.1:8000/mock-gov-portal",
         "description": "Financial inclusion - bank accounts for all"
     },
     "rhiss": {
         "name": "Rural Housing Interest Subsidy Scheme (RHISS)",
         "required_docs": ["aadhar"],
-        "portal_url": "http://localhost:8000/mock-gov-portal",
+        "portal_url": "http://127.0.0.1:8000/mock-gov-portal",
         "description": "Housing scheme for rural areas"
     },
 }
@@ -111,6 +118,11 @@ def high_quality_search(query, fetch_k=20, top_n=3):
     # Return only the top_n highest quality chunks
     return [doc for doc, meta, score in reranked_results[:top_n]]
 
+async def async_high_quality_search(query, fetch_k=20, top_n=3):
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, high_quality_search, query, fetch_k, top_n)
+
 async def get_sarvam_stream(system_prompt: str, user_query: str):
     url = "https://api.sarvam.ai/v1/chat/completions"
     headers = {
@@ -159,7 +171,47 @@ async def get_sarvam_stream(system_prompt: str, user_query: str):
 
 class ChatRequest(BaseModel):
     user_text: str
-    
+@app.post("/register")
+async def register(
+    username: str = Form(...),
+    email: str = Form(...),
+    phone: str = Form(...)
+):
+    """
+    Registers a new user and saves to DynamoDB.
+    """
+    try:
+        profile = {
+            "user_id": phone,
+            "username": username,
+            "email": email,
+            "phone": phone,
+            "aadhar": "", # To be collected by AI
+            "district": "", # To be collected by AI
+            "status": "Registered"
+        }
+        success = storage_service.save_user_profile(profile)
+        if success:
+            return {"status": "Success", "message": f"User {username} registered successfully"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to save to database")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/login")
+async def login(phone: str = Form(...)):
+    """
+    Checks if a user exists in DynamoDB based on phone number.
+    """
+    try:
+        profile = storage_service.get_user_profile(phone)
+        if profile and (profile.get('phone') == phone or profile.get('user_id') == phone):
+            return {"status": "Success", "profile": profile}
+        else:
+            raise HTTPException(status_code=404, detail="User not found. Please register.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/chat")
 async def chat_with_agent(request: ChatRequest):
     user_query = request.user_text
@@ -231,17 +283,17 @@ async def process_submission(
 
     # 4. Feed the result back to Sarvam LLM for a natural response
     if submission_result["status"] == "success":
-        system_prompt = f"""You are a helpful caseworker from Team Yojana Setu. The user's name is {user_name}.
-        Their application was just submitted successfully.
-        The government portal returned this exact message: '{submission_result["message"]}'.
-        Relay this good news to {user_name} in a warm, encouraging way and tell them what to expect next.
-        IMPORTANT: Address the user by their name '{user_name}'. Sign off as 'Team Yojana Setu'.
-        Do NOT use any placeholders like [User's Name] or [Contact Info]. Do NOT include any contact information or email signatures."""
+        system_prompt = f"""[STRICT: SUCCESS CONFIRMATION]
+        The user {user_name} has successfully submitted their application.
+        The portal message is: '{submission_result["message"]}'.
+        REPORT THIS SUCCESS DIRECTLY. DO NOT mention technical issues, apologies, or support contacts.
+        Address {user_name} by name. Sign off: Team Yojana Setu."""
     else:
-        system_prompt = f"""You are a helpful caseworker from Team Yojana Setu. The user's name is {user_name}.
-        The automated submission failed with this error: '{submission_result["message"]}'.
-        Apologize to {user_name} by name and tell them we will try again later.
-        Sign off as 'Team Yojana Setu'. Do NOT use any placeholders or include contact information."""
+        system_prompt = f"""[STRICT: FAILURE NOTIFICATION]
+        The application for {user_name} failed.
+        Error: '{submission_result["message"]}'.
+        Briefly inform the user and apologize for the failure.
+        Sign off: Team Yojana Setu."""
 
     # 5. Generate final conversational response
     chat_response = sarvam_client.chat.completions(
@@ -307,13 +359,112 @@ Examples:
         print(f"⚠️ Intent parse failed, defaulting to query")
         return {"intent": "query", "scheme_id": None}
 
+async def async_detect_intent(user_text: str):
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, detect_intent, user_text)
+
+
+@app.post("/api/voice-agent")
+async def voice_agent_orchestrator(
+    audio: UploadFile = File(...),
+    user_name: str = Form("Citizen"),
+    scheme_id: Optional[str] = Form(None)
+):
+    """
+    🎤 Voice-to-Voice Agent Endpoint
+    1. Transcribe audio -> Text
+    2. Process Text through Orchestrator Logic
+    3. Response Text -> Audio
+    4. Return Text + Audio
+    """
+    # 1. Save temp audio
+    temp_audio_path = f"temp_voice_{uuid.uuid4()}.wav"
+    try:
+        with open(temp_audio_path, "wb") as buffer:
+            shutil.copyfileobj(audio.file, buffer)
+            
+        # 2. Transcribe (STT)
+        with open(temp_audio_path, "rb") as f:
+            stt_response = sarvam_client.speech_to_text.transcribe(
+                file=f,
+                model="saaras:v3",
+                mode="transcribe"
+            )
+        user_text = stt_response.transcript
+        print(f"🎙️ Voice Transcript: {user_text}")
+
+        # 3. Decision Logic (Dynamic Language Response)
+        intent_result = await async_detect_intent(user_text)
+        detected_intent = intent_result["intent"]
+        detected_scheme = scheme_id or intent_result["scheme_id"]
+        
+        # Get context if it's a query
+        retrieved_facts = []
+        if detected_intent == "query":
+            retrieved_facts = await async_high_quality_search(user_text)
+        
+        context_string = "\n".join(retrieved_facts)
+        
+        # Unified Prompt to ensure language consistency
+        voice_system_prompt = f"""You are 'Shubh', a friendly AI caseworker for Yojana-Setu. 
+        USER CONTEXT: Name: {user_name}, Intent: {detected_intent}, Detected Scheme: {detected_scheme}.
+        FACTS FOR REFERENCE: {context_string or 'General government scheme guidance.'}
+        
+        TASK:
+        1. If the user is asking a question (query), answer clearly based on the facts.
+        2. If the user wants to apply and the scheme is not clear, ask them politely which scheme they are interested in.
+        3. If they want to apply and the scheme IS clear, tell them which documents they need to upload to the chat.
+        
+        CRITICAL RULES:
+        - Respond ONLY in the EXACT SAME LANGUAGE used by the user in their message: "{user_text}".
+        - If the message is in Hindi, respond in Hindi. If in English, respond in English.
+        - Keep the response concise and friendly, suitable for a voice conversation."""
+
+        chat_response = sarvam_client.chat.completions(
+            messages=[
+                {"role": "system", "content": voice_system_prompt},
+                {"role": "user", "content": user_text}
+            ]
+        )
+        agent_text = chat_response.choices[0].message.content
+
+        # 4. Text-to-Speech (Dynamic Language Detection)
+        # Use regex to detect if there are Hindi (Devanagari) characters
+        import re
+        is_hindi = bool(re.search(r'[\u0900-\u097F]', agent_text))
+        target_lang = "hi-IN" if is_hindi else "en-IN"
+        
+        print(f"🔊 AI Response ({target_lang}): {agent_text}")
+
+        tts_response = sarvam_client.text_to_speech.convert(
+            text=agent_text,
+            target_language_code=target_lang,
+            model="bulbul:v3",
+            speaker="shubh" 
+        )
+        audio_base64 = tts_response.audios[0] if hasattr(tts_response, 'audios') else tts_response.get("audios", [""])[0]
+
+        return {
+            "user_text": user_text,
+            "agent_text": agent_text,
+            "audio_base64": audio_base64,
+            "meta": {"intent": detected_intent, "scheme": detected_scheme}
+        }
+
+    except Exception as e:
+        print(f"❌ Voice Agent Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
 
 @app.post("/api/agent")
 async def agent_orchestrator(
     user_text: str = Form(...),
     user_name: str = Form("Citizen"),
     scheme_id: Optional[str] = Form(None),
-    documents: Optional[List[UploadFile]] = File(None),
+    documents: List[UploadFile] = File([]),
     doc_types: Optional[str] = Form(None),
 ):
     """
@@ -322,14 +473,19 @@ async def agent_orchestrator(
     - Routes to the correct sub-agent
     - Returns structured response with actions
     """
-    has_files = documents is not None and len(documents) > 0 and documents[0].filename != ""
+    # Filter out empty files
+    documents = [d for d in documents if d.filename != ""]
+    has_files = len(documents) > 0
+    
+    # Language detection (Devanagari check)
+    is_hindi = bool(re.search(r'[\u0900-\u097F]', user_text))
     
     print(f"\n{'='*50}")
     print(f"🤖 AGENT REQUEST: text='{user_text}', files={has_files}, scheme_id={scheme_id}")
     print(f"{'='*50}")
     
     # Step 1: Detect intent
-    intent_result = detect_intent(user_text)
+    intent_result = await async_detect_intent(user_text)
     detected_intent = intent_result["intent"]
     detected_scheme = scheme_id or intent_result["scheme_id"]  # explicit > detected
     
@@ -339,7 +495,7 @@ async def agent_orchestrator(
     # ROUTE 1: User is asking questions → Knowledge Agent (RAG)
     # --------------------------------------------------
     if detected_intent == "query" and not has_files:
-        retrieved_facts = high_quality_search(user_text)
+        retrieved_facts = await async_high_quality_search(user_text)
         context_string = "\n\n---\n\n".join(retrieved_facts)
         
         if not context_string:
@@ -377,24 +533,22 @@ Do not use jargon. Be warm and encouraging."""
                 "available_schemes": {k: v["name"] for k, v in SCHEME_REGISTRY.items()}
             }
         
-        scheme = SCHEME_REGISTRY.get(detected_scheme)
-        if not scheme:
+            scheme_name = scheme["name"]
+            doc_names = ", ".join([d.upper() + " Card" for d in scheme["required_docs"]])
+            
+            if is_hindi:
+                response = f"Zaroor! {scheme_name} ke liye aapko {doc_names} upload karne honge. Kripya apne documents bhej dijiye."
+            else:
+                response = f"Great! To apply for {scheme_name}, please upload the following documents: {doc_names}."
+                
             return {
                 "intent": "apply",
-                "action": "clarify_scheme",
-                "response": f"I couldn't find a scheme with id '{detected_scheme}'.",
-                "available_schemes": {k: v["name"] for k, v in SCHEME_REGISTRY.items()}
+                "action": "upload_documents",
+                "scheme_id": detected_scheme,
+                "scheme_name": scheme_name,
+                "required_docs": scheme["required_docs"],
+                "response": response
             }
-        
-        doc_names = ", ".join([d.upper() + " Card" for d in scheme["required_docs"]])
-        return {
-            "intent": "apply",
-            "action": "upload_documents",
-            "scheme_id": detected_scheme,
-            "scheme_name": scheme["name"],
-            "required_docs": scheme["required_docs"],
-            "response": f"Great! To apply for {scheme['name']}, please upload the following documents: {doc_names}. Send them as file attachments along with your next message."
-        }
     
     # --------------------------------------------------
     # ROUTE 3: User has files → Action Agent (Validate + Submit)
@@ -411,10 +565,14 @@ Do not use jargon. Be warm and encouraging."""
         
         scheme = SCHEME_REGISTRY.get(detected_scheme)
         if not scheme:
+            if is_hindi:
+                resp = f"Maaf kijiye, mujhe '{detected_scheme}' nam ki koi scheme nahi mili. Kya aap dobara bata sakte hain?"
+            else:
+                resp = f"Unknown scheme '{detected_scheme}'. Please specify another."
             return {
                 "intent": "apply",
                 "action": "clarify_scheme",
-                "response": f"Unknown scheme '{detected_scheme}'.",
+                "response": resp,
                 "available_schemes": {k: v["name"] for k, v in SCHEME_REGISTRY.items()}
             }
         
@@ -444,12 +602,16 @@ Do not use jargon. Be warm and encouraging."""
                 for p in temp_paths:
                     if os.path.exists(p):
                         os.remove(p)
+                if is_hindi:
+                    resp = f"{doc_type} check karne mein dikkat hui: {validation.get('error', 'Unknown error')}. Kripya saaf photo upload karein."
+                else:
+                    resp = f"Document validation failed for {doc_type}: {validation.get('error', 'Unknown error')}. Please upload a clearer document."
                 return {
                     "intent": "apply",
                     "status": "error",
                     "action": "reupload",
                     "failed_doc": doc_type,
-                    "response": f"Document validation failed for {doc_type}: {validation.get('error', 'Unknown error')}. Please upload a clearer document."
+                    "response": resp
                 }
             
             validated_docs[doc_type] = {
@@ -475,26 +637,45 @@ Do not use jargon. Be warm and encouraging."""
                 os.remove(p)
         
         # Generate natural response via LLM
+        target_lang = "Hindi" if is_hindi else "English"
+        
         if submission_result["status"] == "success":
-            llm_prompt = f"""You are a caseworker from Team Yojana Setu. The user is {user_name}.
-            Their application for '{scheme['name']}' was submitted successfully.
-            Portal message: '{submission_result["message"]}'.
-            Congratulate {user_name} warmly. Sign off as 'Team Yojana Setu'.
-            Do NOT use placeholders or contact info."""
+            llm_prompt = f"""[STRICT: SUCCESS]
+            The user {user_name} has successfully applied for {scheme['name']}.
+            Success Message: '{submission_result["message"]}'.
+            Report success enthusiastically. 
+            LANGUAGE REQUIREMENT: Respond ONLY in {target_lang}.
+            Sign off: Team Yojana Setu."""
         else:
-            llm_prompt = f"""You are a caseworker from Team Yojana Setu. The user is {user_name}.
-            Application for '{scheme['name']}' failed: '{submission_result["message"]}'.
-            Apologize to {user_name}. Sign off as 'Team Yojana Setu'. No placeholders."""
+            # Provide more context to the LLM about the failure
+            error_msg = submission_result.get("message", "Unknown technical error")
+            llm_prompt = f"""[STRICT: FAILURE CASE]
+            The application for {scheme['name']} failed.
+            Technical Error: '{error_msg}'.
+            Explain to {user_name} that we encountered a problem with the government portal submission.
+            If it's a timeout, suggest they try again later.
+            Be polite but clear about the failure.
+            LANGUAGE REQUIREMENT: Respond ONLY in {target_lang}.
+            Sign off: Team Yojana Setu."""
 
-        chat_response = sarvam_client.chat.completions(
-            messages=[{"role": "user", "content": llm_prompt}]
-        )
+        try:
+            chat_response = sarvam_client.chat.completions(
+                messages=[{"role": "user", "content": llm_prompt}]
+            )
+            response_text = chat_response.choices[0].message.content
+        except Exception as e:
+            print(f"⚠️ LLM response generation failed: {e}")
+            if is_hindi:
+                response_text = f"Maaf kijiye, application submission mein problem aayi hai: {error_msg}. Kripya dobara koshish karein."
+            else:
+                response_text = f"We encountered a problem with your submission: {error_msg}. Please try again later."
         
         return {
             "intent": "apply",
             "status": submission_result["status"],
             "scheme": scheme["name"],
-            "response": chat_response.choices[0].message.content
+            "response": response_text,
+            "error_detail": submission_result.get("message") if submission_result["status"] != "success" else None
         }
 
 # ---------------------------------------------------------
@@ -593,17 +774,15 @@ async def apply_for_scheme(
     
     # 4. Generate natural language response via Sarvam LLM
     if submission_result["status"] == "success":
-        system_prompt = f"""You are a helpful caseworker from Team Yojana Setu. The user's name is {user_name}.
-        Their application for '{scheme['name']}' was just submitted successfully.
-        The government portal returned this message: '{submission_result["message"]}'.
-        Relay this good news to {user_name} in a warm, encouraging way and tell them what to expect next.
-        IMPORTANT: Address the user by their name '{user_name}'. Sign off as 'Team Yojana Setu'.
-        Do NOT use any placeholders like [User's Name] or [Contact Info]. Do NOT include any contact information or email signatures."""
+        system_prompt = f"""[STRICT: SUCCESS]
+        The user {user_name} successfully applied for {scheme['name']}.
+        Portal message: '{submission_result["message"]}'.
+        REPORT SUCCESS. DO NOT APOLOGIZE. DO NOT mention internal errors or timeouts.
+        Sign off: Team Yojana Setu."""
     else:
-        system_prompt = f"""You are a helpful caseworker from Team Yojana Setu. The user's name is {user_name}.
-        The application for '{scheme['name']}' failed with this error: '{submission_result["message"]}'.
-        Apologize to {user_name} by name and tell them we will try again later.
-        Sign off as 'Team Yojana Setu'. Do NOT use any placeholders or include contact information."""
+        system_prompt = f"""[STRICT: FAILURE]
+        Application failed: '{submission_result["message"]}'.
+        Inform {user_name}. Sign off: Team Yojana Setu."""
 
     chat_response = sarvam_client.chat.completions(
         messages=[{"role": "user", "content": system_prompt}]

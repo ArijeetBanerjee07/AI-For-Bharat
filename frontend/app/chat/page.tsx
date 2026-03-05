@@ -15,12 +15,10 @@ export default function ChatPage() {
     const [input, setInput] = useState('');
     const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
     const [isLoading, setIsLoading] = useState(false);
-    const [agentBrowserVisible, setAgentBrowserVisible] = useState(false);
     const [userPhone, setUserPhone] = useState<string | null>(null);
     const [userName, setUserName] = useState<string | null>(null);
     const [detectedScheme, setDetectedScheme] = useState<string | null>(null);
 
-    const iframeRef = useRef<HTMLIFrameElement>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -58,17 +56,103 @@ export default function ChatPage() {
         scrollToBottom();
     }, [messages]);
 
-    const triggerPortalApplication = (payload: any) => {
-        setAgentBrowserVisible(true);
-        // Wait for iframe to load, then send message
-        setTimeout(() => {
-            if (iframeRef.current?.contentWindow) {
-                iframeRef.current.contentWindow.postMessage({
-                    type: 'AUTO_FILL',
-                    payload: payload
-                }, '*');
+
+    const [isRecording, setIsRecording] = useState(false);
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const audioChunksRef = useRef<Blob[]>([]);
+
+    const startRecording = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const mediaRecorder = new MediaRecorder(stream);
+            mediaRecorderRef.current = mediaRecorder;
+            audioChunksRef.current = [];
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    audioChunksRef.current.push(event.data);
+                }
+            };
+
+            mediaRecorder.onstop = () => {
+                const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
+                handleVoiceMessage(audioBlob);
+                stream.getTracks().forEach(track => track.stop());
+            };
+
+            mediaRecorder.start();
+            setIsRecording(true);
+        } catch (err) {
+            console.error("Mic access denied:", err);
+            alert("Kripya microphone access allow karein.");
+        }
+    };
+
+    const stopRecording = () => {
+        if (mediaRecorderRef.current && isRecording) {
+            mediaRecorderRef.current.stop();
+            setIsRecording(false);
+        }
+    };
+
+    const handleVoiceMessage = async (audioBlob: Blob) => {
+        setIsLoading(true);
+        // Add a temporary "User is speaking..." message
+        setMessages(prev => [...prev, { role: 'user', content: "🎙️ Processing voice..." }]);
+        setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+
+        try {
+            const formData = new FormData();
+            formData.append('audio', audioBlob, 'voice.wav');
+            formData.append('user_name', userName || "Citizen");
+            if (detectedScheme) formData.append('scheme_id', detectedScheme);
+
+            const response = await fetch('http://localhost:8000/api/voice-agent', {
+                method: 'POST',
+                body: formData,
+            });
+
+            if (!response.ok) throw new Error('Voice API failed');
+
+            const data = await response.json();
+
+            // Update messages with transcribed text and agent reply
+            setMessages(prev => {
+                const newMessages = [...prev];
+                // Update user transcript
+                newMessages[newMessages.length - 2] = {
+                    role: 'user',
+                    content: `🎙️ ${data.user_text}`
+                };
+                // Update assistant response
+                newMessages[newMessages.length - 1] = {
+                    role: 'assistant',
+                    content: data.agent_text
+                };
+                return newMessages;
+            });
+
+            if (data.meta?.scheme) setDetectedScheme(data.meta.scheme);
+
+            // Play the audio response
+            if (data.audio_base64) {
+                const audio = new Audio(`data:audio/mp3;base64,${data.audio_base64}`);
+                audio.play();
             }
-        }, 1500);
+
+        } catch (error) {
+            console.error('Voice Error:', error);
+            setMessages(prev => {
+                const newMessages = [...prev];
+                newMessages[newMessages.length - 1] = {
+                    role: 'assistant',
+                    content: 'Kshama kijiye, awaaz samajhne mein dikkat hui.'
+                };
+                return newMessages;
+            });
+        } finally {
+            setIsLoading(false);
+        }
     };
 
     const handleSendMessage = async (e: React.FormEvent) => {
@@ -173,29 +257,6 @@ export default function ChatPage() {
                         }
                     }
                 }
-
-                // After stream is done, check for actions in the final content
-                const actionRegex = /\[ACTION:\s*OPEN_PORTAL\s*\|\s*scheme:\s*(.*?)\s*\|\s*details:\s*(\{.*?\})\]/;
-                const match = accumulatedContent.match(actionRegex);
-
-                if (match) {
-                    try {
-                        const scheme = match[1].trim();
-                        const details = JSON.parse(match[2]);
-                        const payload = { scheme, details };
-
-                        const cleanedContent = accumulatedContent.replace(actionRegex, '').trim();
-                        setMessages(prev => {
-                            const newMessages = [...prev];
-                            newMessages[newMessages.length - 1].content = cleanedContent || "Opening portal for application...";
-                            return newMessages;
-                        });
-
-                        triggerPortalApplication(payload);
-                    } catch (err) {
-                        console.error('Action execution failed:', err);
-                    }
-                }
             }
 
 
@@ -234,12 +295,6 @@ export default function ChatPage() {
                 </div>
 
                 <div className="flex gap-3">
-                    <button
-                        onClick={() => setAgentBrowserVisible(!agentBrowserVisible)}
-                        className={`px-4 py-2 rounded-xl text-xs font-black transition-all border-2 ${agentBrowserVisible ? 'bg-[#138808] border-[#138808] text-white shadow-lg' : 'bg-slate-50 border-slate-200 text-slate-600'}`}
-                    >
-                        {agentBrowserVisible ? '🎯 PORTAL LIVE' : '🖥️ GOV PORTAL'}
-                    </button>
                     <Link href="/" className="px-4 py-2 bg-slate-50 border-2 border-slate-200 rounded-xl text-xs font-black text-slate-600 hover:bg-slate-100 transition-all">
                         HOME
                     </Link>
@@ -248,7 +303,7 @@ export default function ChatPage() {
 
             <div className="flex flex-1 overflow-hidden relative">
                 {/* Chat Panel (Full width focus) */}
-                <main className={`transition-all duration-700 flex flex-col ${agentBrowserVisible ? 'flex-[0.5]' : 'flex-1'} bg-white`}>
+                <main className="flex-1 transition-all duration-700 flex flex-col bg-white">
                     <div className="flex-1 overflow-y-auto p-4 sm:p-8 space-y-8 no-scrollbar">
                         <div className="max-w-4xl mx-auto space-y-10">
                             {messages.map((msg, idx) => (
@@ -332,7 +387,6 @@ export default function ChatPage() {
                                             if (files.length > 0) {
                                                 setSelectedFiles(prev => [...prev, ...files]);
                                             }
-                                            // Reset value so same file can be selected again if removed
                                             e.target.value = '';
                                         }}
                                         accept=".pdf,image/*"
@@ -342,9 +396,26 @@ export default function ChatPage() {
                                         value={input}
                                         onChange={(e) => setInput(e.target.value)}
                                         placeholder="Puchhiye: PM Kisan eligibility kya hai?"
-                                        className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl pl-16 pr-6 py-5 text-slate-800 placeholder-slate-400 focus:outline-none focus:border-[#FF9933] focus:bg-white transition-all font-semibold shadow-sm"
+                                        className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl pl-16 pr-24 py-5 text-slate-800 placeholder-slate-400 focus:outline-none focus:border-[#FF9933] focus:bg-white transition-all font-semibold shadow-sm"
                                         disabled={isLoading}
                                     />
+                                    <button
+                                        type="button"
+                                        onClick={isRecording ? stopRecording : startRecording}
+                                        className={`absolute right-3 w-12 h-12 flex items-center justify-center rounded-xl transition-all z-10 ${isRecording ? 'bg-red-500 text-white animate-pulse' : 'bg-blue-50 text-blue-600 hover:bg-blue-600 hover:text-white'}`}
+                                        title={isRecording ? "Stop Recording" : "Start Voice Chat"}
+                                    >
+                                        {isRecording ? (
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 10a1 1 0 011-1 1 1 0 011 1v4a1 1 0 01-1 1 1 1 0 01-1-1v-4zM13 10a1 1 0 011-1 1 1 0 011 1v4a1 1 0 01-1 1 1 1 0 01-1-1v-4z" />
+                                            </svg>
+                                        ) : (
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                                            </svg>
+                                        )}
+                                    </button>
                                 </div>
                                 <button
                                     type="submit"
@@ -358,21 +429,6 @@ export default function ChatPage() {
                         <p className="text-center text-[10px] text-slate-400 mt-4 font-bold uppercase tracking-widest">Digital India • Yojana-Setu AI Powered</p>
                     </div>
                 </main>
-
-                {/* Agent Browser (Right Side - Conditional for Demo) */}
-                {agentBrowserVisible && (
-                    <div className="w-1/2 relative bg-slate-50 border-l-4 border-slate-100 animate-in slide-in-from-right duration-700">
-                        <iframe
-                            ref={iframeRef}
-                            src="/gov-portal"
-                            className="w-full h-full border-none"
-                            title="Government Portal"
-                        />
-                        <div className="absolute top-0 left-0 w-full p-2 bg-gradient-to-r from-[#FF9933] via-white to-[#138808] text-slate-900 text-[10px] font-black text-center uppercase tracking-widest shadow-sm">
-                            Real-Time Agent Automation Active
-                        </div>
-                    </div>
-                )}
             </div>
         </div>
     );

@@ -34,6 +34,14 @@ yarn-error.log*
 *.swp
 *.swo
 
+# --- Project Specific ---
+yojana_setu_db/
+temp_bedrock_chunks/
+temp_*.wav
+temp_*.pdf
+temp_*.jpg
+_temp_*
+
 # --- OS generated files ---
 .DS_Store
 Thumbs.db
