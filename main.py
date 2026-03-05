@@ -40,20 +40,20 @@ app.add_middleware(
 SCHEME_REGISTRY = {
     "pmay-g": {
         "name": "Pradhan Mantri Awaas Yojana - Gramin (PMAY-G)",
-        "required_docs": ["aadhar"],
-        "portal_url": "http://127.0.0.1:8000/mock-gov-portal",
+        "required_docs": ["aadhar", "income", "photo"],
+        "portal_url": "https://dummy-pmawas.vercel.app/",
         "description": "Housing scheme for rural areas"
     },
     "pmay-u": {
         "name": "Pradhan Mantri Awaas Yojana - Urban (PMAY-U)",
-        "required_docs": ["aadhar"],
-        "portal_url": "http://127.0.0.1:8000/mock-gov-portal",
+        "required_docs": ["aadhar", "income", "photo"],
+        "portal_url": "https://dummy-pmawas.vercel.app/",
         "description": "Housing scheme for urban areas"
     },
     "pmjdy": {
         "name": "Pradhan Mantri Jan Dhan Yojana (PMJDY)",
-        "required_docs": ["aadhar"],
-        "portal_url": "http://127.0.0.1:8000/mock-gov-portal",
+        "required_docs": ["aadhar", "photo"],
+        "portal_url": "https://pm-kisan-portal.vercel.app/",
         "description": "Financial inclusion - bank accounts for all"
     },
     "rhiss": {
@@ -213,8 +213,11 @@ async def login(phone: str = Form(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/chat")
-async def chat_with_agent(request: ChatRequest):
-    user_query = request.user_text
+async def chat_with_agent(
+    user_text: str = Form(...),
+    user_name: str = Form("Citizen")
+):
+    user_query = user_text
     
     # 1. Retrieve Facts from the Database
     retrieved_facts = high_quality_search(user_query)
@@ -363,6 +366,55 @@ async def async_detect_intent(user_text: str):
     import asyncio
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, detect_intent, user_text)
+
+def extract_user_details(ocr_text: str):
+    prompt = f"""You are a data extraction assistant. Extract personal details from the following OCR text of uploaded documents to fill a government scheme application form.
+
+Available fields to extract (return ONLY a valid JSON object matching these keys):
+- fullname (string)
+- fathername (string)
+- dob (string, format YYYY-MM-DD)
+- gender (string, 'male', 'female', or 'other')
+- aadhaar (string, 12 digits)
+- mobile (string)
+- email (string)
+- category (string, 'ews', 'lig', 'mig1', 'mig2')
+- income (int)
+- address (string)
+- state (string)
+- district (string)
+- city (string)
+- pincode (string)
+- occupation (string, 'farmer', 'laborer', 'self_employed', 'unemployed', 'student', 'other')
+- existingAccount (string, 'yes' or 'no')
+- nomineeName (string)
+- nomineeRelation (string)
+- nomineeAge (int)
+
+If a field is not found in the text, omit it or leave it empty.
+
+Text:
+'''
+{ocr_text}
+'''
+"""
+    try:
+        response = sarvam_client.chat.completions(
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = response.choices[0].message.content.strip()
+        if "```" in raw:
+            raw = raw.split("```")[1].replace("json", "").strip()
+        # Ensure it's valid JSON
+        return json.loads(raw)
+    except Exception as e:
+        print("Failed to extract details:", e)
+        return {}
+
+async def async_extract_user_details(ocr_text: str):
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, extract_user_details, ocr_text)
 
 
 @app.post("/api/voice-agent")
@@ -533,22 +585,31 @@ Do not use jargon. Be warm and encouraging."""
                 "available_schemes": {k: v["name"] for k, v in SCHEME_REGISTRY.items()}
             }
         
-            scheme_name = scheme["name"]
-            doc_names = ", ".join([d.upper() + " Card" for d in scheme["required_docs"]])
-            
-            if is_hindi:
-                response = f"Zaroor! {scheme_name} ke liye aapko {doc_names} upload karne honge. Kripya apne documents bhej dijiye."
-            else:
-                response = f"Great! To apply for {scheme_name}, please upload the following documents: {doc_names}."
-                
+        scheme = SCHEME_REGISTRY.get(detected_scheme)
+        if not scheme:
             return {
                 "intent": "apply",
-                "action": "upload_documents",
-                "scheme_id": detected_scheme,
-                "scheme_name": scheme_name,
-                "required_docs": scheme["required_docs"],
-                "response": response
+                "action": "clarify_scheme",
+                "response": "I didn't recognize that scheme. Which one do you want to apply for?",
+                "available_schemes": {k: v["name"] for k, v in SCHEME_REGISTRY.items()}
             }
+
+        scheme_name = scheme["name"]
+        doc_names = ", ".join([d.upper() + " Card" for d in scheme["required_docs"]])
+        
+        if is_hindi:
+            response = f"Zaroor! {scheme_name} ke liye aapko {doc_names} upload karne honge. Kripya apne documents bhej dijiye."
+        else:
+            response = f"Great! To apply for {scheme_name}, please upload the following documents: {doc_names}."
+            
+        return {
+            "intent": "apply",
+            "action": "upload_documents",
+            "scheme_id": detected_scheme,
+            "scheme_name": scheme_name,
+            "required_docs": scheme["required_docs"],
+            "response": response
+        }
     
     # --------------------------------------------------
     # ROUTE 3: User has files → Action Agent (Validate + Submit)
@@ -616,19 +677,34 @@ Do not use jargon. Be warm and encouraging."""
             
             validated_docs[doc_type] = {
                 "path": temp_path,
-                "extracted_id": validation["extracted_id"]
+                "extracted_id": validation["extracted_id"],
+                "extracted_text": validation.get("extracted_text", "")
             }
         
         print(f"✅ All documents validated! Submitting to portal...")
         
-        # Submit to portal
+        # Combine all OCR text for LLM extraction
+        all_ocr_text = ""
+        file_paths_dict = {}
+        for dt, info in validated_docs.items():
+            file_paths_dict[dt] = info["path"]
+            if "extracted_text" in info:
+                all_ocr_text += info["extracted_text"] + "\n\n"
+        
+        # Extract user details using LLM
+        user_data = {"name": user_name} # Base
+        if all_ocr_text.strip():
+            extracted_details = await async_extract_user_details(all_ocr_text)
+            user_data.update(extracted_details)
+        
+        # Fallback to the main ID if missing
         primary_doc_type = scheme["required_docs"][0]
         primary_id = validated_docs[primary_doc_type]["extracted_id"]
-        primary_path = validated_docs[primary_doc_type]["path"]
-        
-        user_data = {"name": user_name, "extracted_id": primary_id}
+        if "extracted_id" not in user_data:
+            user_data["extracted_id"] = primary_id
+            
         submission_result = await submit_to_portal_agent(
-            user_data, primary_path, portal_url=scheme["portal_url"]
+            user_data, file_paths_dict, portal_url=scheme["portal_url"]
         )
         
         # Cleanup
@@ -750,20 +826,35 @@ async def apply_for_scheme(
         
         validated_docs[doc_type] = {
             "path": temp_path,
-            "extracted_id": validation["extracted_id"]
+            "extracted_id": validation["extracted_id"],
+            "extracted_text": validation.get("extracted_text", "")
         }
     
     print(f"✅ All documents validated! Submitting to {scheme['name']} portal...")
     
-    # 3. Auto-fill the portal (use the first document's ID as the primary identifier)
+    # Combine all OCR text for LLM extraction
+    all_ocr_text = ""
+    file_paths_dict = {}
+    for dt, info in validated_docs.items():
+        file_paths_dict[dt] = info["path"]
+        if "extracted_text" in info:
+            all_ocr_text += info["extracted_text"] + "\n\n"
+            
+    # Extract user details using LLM
+    user_data = {"name": user_name} # Base
+    if all_ocr_text.strip():
+        extracted_details = await async_extract_user_details(all_ocr_text)
+        user_data.update(extracted_details)
+
+    # Fallback to the main ID if missing
     primary_doc_type = scheme["required_docs"][0]
     primary_id = validated_docs[primary_doc_type]["extracted_id"]
-    primary_path = validated_docs[primary_doc_type]["path"]
-    
-    user_data = {"name": user_name, "extracted_id": primary_id}
+    if "extracted_id" not in user_data:
+        user_data["extracted_id"] = primary_id
+        
     submission_result = await submit_to_portal_agent(
         user_data, 
-        primary_path, 
+        file_paths_dict, 
         portal_url=scheme["portal_url"]
     )
     
