@@ -16,6 +16,10 @@ import re
 from pinecone import Pinecone
 from sarvamai import SarvamAI
 from groq import Groq
+from storage_service import StorageService
+
+load_dotenv()
+
 # Lazy load AI models to ensure the port opens immediately on startup
 _model = None
 def get_model():
