@@ -16,19 +16,28 @@ import re
 from pinecone import Pinecone
 from sarvamai import SarvamAI
 from groq import Groq
+from sentence_transformers import SentenceTransformer, CrossEncoder
 from storage_service import StorageService
 
 load_dotenv()
 
 # Lazy load AI models to ensure the port opens immediately on startup
-_model = None
-def get_model():
-    global _model
-    if _model is None:
-        print("🚀 Loading AI Model (Lazy Load activated)...")
-        from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer('all-MiniLM-L6-v2')
-    return _model
+_bi_encoder = None
+_reranker = None
+
+def get_bi_encoder():
+    global _bi_encoder
+    if _bi_encoder is None:
+        print("🚀 Loading Bi-Encoder (Lazy Load activated)...")
+        _bi_encoder = SentenceTransformer('all-MiniLM-L6-v2')
+    return _bi_encoder
+
+def get_reranker():
+    global _reranker
+    if _reranker is None:
+        print("🚀 Loading Reranker (Lazy Load activated)...")
+        _reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+    return _reranker
 
 # Initialize DynamoDB storage service
 storage_service = StorageService()
@@ -87,14 +96,8 @@ def get_scheme_list_for_prompt():
     return "\n".join(lines)
 
 # ---------------------------------------------------------
-# RAG Setup: Load Models and Database
+# RAG Setup: Database Connection (Models are lazy-loaded later)
 # ---------------------------------------------------------
-print("Loading Embedding Models (this might take a few seconds)...")
-# Bi-Encoder (Stage 1: Fast Search)
-bi_encoder = SentenceTransformer('all-MiniLM-L6-v2')
-# Cross-Encoder (Stage 3: High-Accuracy Reranking)
-reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
-
 # Connect to Pinecone
 pinecone_api_key = os.getenv("PINECONE_API_KEY")
 pc = Pinecone(api_key=pinecone_api_key)
@@ -108,7 +111,7 @@ print("Pinecone Database connected!")
 
 def high_quality_search(query, fetch_k=20, top_n=3):
     # Step 1: Semantic Search (fetch_k results)
-    query_embedding = bi_encoder.encode(query).tolist()
+    query_embedding = get_bi_encoder().encode(query).tolist()
     
     results = index.query(
         vector=query_embedding,
@@ -131,7 +134,7 @@ def high_quality_search(query, fetch_k=20, top_n=3):
     # Step 2: Reranking (Cross-Encoder)
     # We pair the query with each document to get a specific relevance score
     sentence_pairs = [[query, doc] for doc in documents]
-    scores = reranker.predict(sentence_pairs)
+    scores = get_reranker().predict(sentence_pairs)
 
     # Sort documents by their reranker scores
     reranked_results = sorted(
