@@ -1,5 +1,9 @@
-import chromadb
+import os
+from pinecone import Pinecone
+from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer, CrossEncoder
+
+load_dotenv()
 
 # 1. Load Models
 # Bi-Encoder (Stage 1: Fast Search)
@@ -7,20 +11,35 @@ bi_encoder = SentenceTransformer('all-MiniLM-L6-v2')
 # Cross-Encoder (Stage 3: High-Accuracy Reranking)
 reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
 
-# 2. Connect to Chroma
-chroma_client = chromadb.PersistentClient(path="./yojana_setu_db")
-collection = chroma_client.get_collection(name="government_schemes")
+# 2. Connect to Pinecone
+pinecone_api_key = os.getenv("PINECONE_API_KEY")
+pc = Pinecone(api_key=pinecone_api_key)
+index_name = "yojana-setu"
+index = pc.Index(index_name)
 
 def high_quality_search(query, fetch_k=20, top_n=3):
     # Step 1: Semantic Search (fetch_k results)
     query_embedding = bi_encoder.encode(query).tolist()
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=fetch_k  # Grab a larger pool first
+    
+    # Query Pinecone
+    results = index.query(
+        vector=query_embedding,
+        top_k=fetch_k,
+        include_metadata=True
     )
     
-    documents = results['documents'][0]
-    metadatas = results['metadatas'][0]
+    if not results.matches:
+        return []
+        
+    documents = []
+    metadatas = []
+    
+    for match in results.matches:
+        meta = match.metadata or {}
+        # We stored the text inside metadata['content']
+        doc = meta.get('content', '')
+        documents.append(doc)
+        metadatas.append(meta)
 
     # Step 2: Reranking (Cross-Encoder)
     # We pair the query with each document to get a specific relevance score

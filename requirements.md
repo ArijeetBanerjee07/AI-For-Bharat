@@ -32,7 +32,7 @@
 
 ### Low-Cost Implementation Stack
 #### AI and ML (5 services)
-- **FAISS/ChromaDB**: RAG knowledge base (Free)
+- **Pinecone**: RAG knowledge base (Free)
 - **TesseractOCR**: Document OCR (Open-source)
 - **Whisper**: Speech-to-text (Free)
 - **gTTS**: Text-to-speech (Free)

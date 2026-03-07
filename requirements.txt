@@ -5,7 +5,7 @@ python-dotenv
 python-multipart
 requests
 httpx
-chromadb
+pinecone
 sentence-transformers
 torch
 langchain-text-splitters
