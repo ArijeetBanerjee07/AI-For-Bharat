@@ -11,7 +11,6 @@ from submission_agent import validate_document_with_sarvam, submit_to_portal_age
 import shutil
 import uuid
 import asyncio
-import re
 import uvicorn
 
 from pinecone import Pinecone
@@ -21,16 +20,8 @@ from storage_service import StorageService
 
 load_dotenv()
 
-# Lazy load Reranker model
-_reranker = None
-
-def get_reranker():
-    global _reranker
-    if _reranker is None:
-        print("🚀 Loading Reranker (Lazy Load activated)...")
-        from sentence_transformers import CrossEncoder
-        _reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
-    return _reranker
+# Cloud-Only Search: No local AI models means near-instant startup.
+# We offload all vector logic to Pinecone Serverless Inference.
 
 # Initialize DynamoDB storage service
 storage_service = StorageService()
@@ -102,10 +93,9 @@ print("Pinecone Database connected!")
 # Helper Functions
 # ---------------------------------------------------------
 
-def high_quality_search(query, fetch_k=20, top_n=3):
+def high_quality_search(query, top_n=5):
     # Step 1: Semantic Search (fetch_k results)
     # ⚡ Use Pinecone Serverless Inference (Cloud-based thinking)
-    # This is 10x faster than running the model on Render's tiny CPU.
     try:
         res = pc.inference.embed(
             model="multilingual-e5-large",
@@ -114,47 +104,25 @@ def high_quality_search(query, fetch_k=20, top_n=3):
         )
         query_embedding = res[0].values
     except Exception as e:
-        print(f"⚠️ Pinecone Inference failed: {e}. Falling back to keyword search logic.")
-        # Minimal fallback: try to find something in metadata if search fails
+        print(f"⚠️ Pinecone Inference failed: {e}")
         return []
 
+    # Fast retrieval from Pinecone Cloud
     results = index.query(
         vector=query_embedding,
-        top_k=fetch_k,
+        top_k=top_n,
         include_metadata=True
     )
     
     if not results.matches:
         return []
         
-    documents = []
-    metadatas = []
-    
-    for match in results.matches:
-        meta = match.metadata or {}
-        doc = meta.get('content', '')
-        documents.append(doc)
-        metadatas.append(meta)
+    return [match.metadata.get('content', '') for match in results.matches if match.metadata]
 
-    # Step 2: Reranking (Cross-Encoder)
-    # We keep the Reranker for high accuracy as requested.
-    sentence_pairs = [[query, doc] for doc in documents]
-    scores = get_reranker().predict(sentence_pairs)
-
-    # Sort documents by their reranker scores
-    reranked_results = sorted(
-        list(zip(documents, metadatas, scores)),
-        key=lambda x: x[2],
-        reverse=True
-    )
-
-    # Return only the top_n highest quality chunks
-    return [doc for doc, meta, score in reranked_results[:top_n]]
-
-async def async_high_quality_search(query, fetch_k=20, top_n=3):
+async def async_high_quality_search(query, top_n=5):
     import asyncio
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, high_quality_search, query, fetch_k, top_n)
+    return await loop.run_in_executor(None, high_quality_search, query, top_n)
 
 async def get_sarvam_stream(system_prompt: str, user_query: str):
     url = "https://api.sarvam.ai/v1/chat/completions"
