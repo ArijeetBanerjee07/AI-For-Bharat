@@ -41,7 +41,7 @@ Open [http://localhost:3000](http://localhost:3000) to view the application.
 
 ##  Live Application
 > [!NOTE]
-> **Live Link:** [Coming Soon]
+> **Live Link:** [ai-for-bharat-orcin.vercel.app/home](https://ai-for-bharat-orcin.vercel.app/home)
 
 ---
 
@@ -67,7 +67,7 @@ graph TD
 - **AI/LLMs**: 
   - **Sarvam AI**: For `sarvam-30b` reasoning and high-fidelity Indic TTS/STT.
   - **Llama 3.3 (Groq)**: For real-time voice agent orchestration.
-- **RAG Engine**: Pinecone Vector DB with `SentenceTransformer` (bi-encoder) and `Cross-Encoder` reranking.
+- **RAG Engine**: Pinecone Vector DB with Cloud Serverless Inference (multilingual-e5-large) for instant high-dimension multilingual search.
 - **Database**: AWS DynamoDB (User Profiles & Chat Sessions).
 - **Validation**: Sarvam Document Intelligence for OCR-based ID verification.
 
