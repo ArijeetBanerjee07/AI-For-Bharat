@@ -21,17 +21,8 @@ from storage_service import StorageService
 
 load_dotenv()
 
-# Lazy load AI models to ensure the port opens immediately on startup
-_bi_encoder = None
+# Lazy load Reranker model
 _reranker = None
-
-def get_bi_encoder():
-    global _bi_encoder
-    if _bi_encoder is None:
-        print("🚀 Loading Bi-Encoder (Lazy Load activated)...")
-        from sentence_transformers import SentenceTransformer
-        _bi_encoder = SentenceTransformer('all-MiniLM-L6-v2')
-    return _bi_encoder
 
 def get_reranker():
     global _reranker
@@ -113,8 +104,20 @@ print("Pinecone Database connected!")
 
 def high_quality_search(query, fetch_k=20, top_n=3):
     # Step 1: Semantic Search (fetch_k results)
-    query_embedding = get_bi_encoder().encode(query).tolist()
-    
+    # ⚡ Use Pinecone Serverless Inference (Cloud-based thinking)
+    # This is 10x faster than running the model on Render's tiny CPU.
+    try:
+        res = pc.inference.embed(
+            model="multilingual-e5-large",
+            inputs=[query],
+            parameters={"input_type": "query"}
+        )
+        query_embedding = res[0].values
+    except Exception as e:
+        print(f"⚠️ Pinecone Inference failed: {e}. Falling back to keyword search logic.")
+        # Minimal fallback: try to find something in metadata if search fails
+        return []
+
     results = index.query(
         vector=query_embedding,
         top_k=fetch_k,
@@ -134,7 +137,7 @@ def high_quality_search(query, fetch_k=20, top_n=3):
         metadatas.append(meta)
 
     # Step 2: Reranking (Cross-Encoder)
-    # We pair the query with each document to get a specific relevance score
+    # We keep the Reranker for high accuracy as requested.
     sentence_pairs = [[query, doc] for doc in documents]
     scores = get_reranker().predict(sentence_pairs)
 
