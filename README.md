@@ -42,6 +42,21 @@ Open [http://localhost:3000](http://localhost:3000) to view the application.
 ##  Live Application
 > [!NOTE]
 > **Live Link:** [ai-for-bharat-orcin.vercel.app/home](https://ai-for-bharat-orcin.vercel.app/home)
+> 
+> ## 🎥  Usage & Demo
+> 
+> ### **Project Walkthrough**
+> 
+> ![](/frontend/public/video.mp4)
+> 
+> ### **Testing & Application (PMAY-G/U)**
+> To test the automated submission and document extraction for the **Pradhan Mantri Awas Yojana**, please use the provided test documents:
+> 
+> 📄 [aadhar.pdf](./ExampleDocs/aadhar.pdf)  
+> 📄 [income_cert.pdf](./ExampleDocs/income_cert.pdf)  
+> 📷 [Arindam_img.jpg.jpeg](./ExampleDocs/Arindam_img.jpg.jpeg)
+> 
+> These files are already pre-formatted to pass through the **Sarvam Document Intelligence** OCR and successfully validate on our **Mock Governance Portal**.
 
 ---
 
