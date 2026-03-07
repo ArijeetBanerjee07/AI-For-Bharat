@@ -28,6 +28,10 @@ app = FastAPI(title="Yojana-Setu Phygital Backend")
 sarvam_client = SarvamAI(api_subscription_key=os.getenv("SARVAM_API_KEY", "dummy_sarvam"))
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY", "dummy_groq_key"))
 
+@app.get("/")
+async def root():
+    return {"status": "online", "message": "AI-For-Bharat Backend is running!"}
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
