@@ -14,12 +14,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the backend code
 COPY backend/ .
 
-# Ensure playwright is ready
+# The Microsoft image already project-installs browsers, 
+# but we need to tell Playwright where they are or ensure they are ready.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install chromium
 
 # Expose the port FastAPI will run on
 EXPOSE 8080
 
 # Command to run the application
-# Use the dynamic PORT variable from Railway
 CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}
