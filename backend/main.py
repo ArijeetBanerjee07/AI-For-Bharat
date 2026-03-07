@@ -12,11 +12,11 @@ import shutil
 import uuid
 import asyncio
 import re
+import uvicorn
 
 from pinecone import Pinecone
 from sarvamai import SarvamAI
 from groq import Groq
-from sentence_transformers import SentenceTransformer, CrossEncoder
 from storage_service import StorageService
 
 load_dotenv()
@@ -29,6 +29,7 @@ def get_bi_encoder():
     global _bi_encoder
     if _bi_encoder is None:
         print("🚀 Loading Bi-Encoder (Lazy Load activated)...")
+        from sentence_transformers import SentenceTransformer
         _bi_encoder = SentenceTransformer('all-MiniLM-L6-v2')
     return _bi_encoder
 
@@ -36,6 +37,7 @@ def get_reranker():
     global _reranker
     if _reranker is None:
         print("🚀 Loading Reranker (Lazy Load activated)...")
+        from sentence_transformers import CrossEncoder
         _reranker = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
     return _reranker
 
@@ -1132,3 +1134,6 @@ async def get_messages(session_id: str):
 async def mock_portal():
     return {"message": "Mock Government Portal Endpoint"}
 # To run: uvicorn main:app --reload
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
