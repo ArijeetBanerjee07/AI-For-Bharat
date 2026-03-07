@@ -7,17 +7,16 @@ WORKDIR /app
 # Install FFmpeg for audio processing
 RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install
+# Copy requirements (made consistent for Railway)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the backend code
-COPY backend/ .
+COPY . .
 
-# The Microsoft image already project-installs browsers, 
-# but we need to tell Playwright where they are or ensure they are ready.
+# IMPORTANT: Tell Playwright to use the pre-installed browsers from the image
+# This skips the 5+ minute download step entirely
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN playwright install chromium
 
 # Expose the port FastAPI will run on
 EXPOSE 8080
