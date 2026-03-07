@@ -6,7 +6,7 @@ python-dotenv
 python-multipart
 requests
 httpx
-pinecone-client
+pinecone
 sentence-transformers
 torch
 langchain-text-splitters
