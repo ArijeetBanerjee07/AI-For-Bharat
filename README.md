@@ -41,9 +41,13 @@ Open [http://localhost:3000](http://localhost:3000) to view the application.
 
 ##  Live Application
 > [!NOTE]
-> **Live Link:** [ai-for-bharat-orcin.vercel.app/home](https://ai-for-bharat-orcin.vercel.app/home)
+> **Frontend Link:** [ai-for-bharat-orcin.vercel.app/home](https://ai-for-bharat-orcin.vercel.app/home)
 > 
-> ## 🎥  Usage & Demo
+> **Backend Link:** [ai-for-bharat-backend.onrender.com](https://ai-for-bharat-backend.onrender.com/)
+> 
+> **Disclaimer:** Please open the backend link first for a better experience (this wakes up the server from sleep).
+> 
+> ##   Usage & Demo
 > 
 > ### **Project Walkthrough**
 > 
