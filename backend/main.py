@@ -34,6 +34,14 @@ groq_client = Groq(api_key=os.getenv("GROQ_API_KEY", "dummy_groq_key"))
 async def root():
     return {"status": "online", "message": "AI-For-Bharat Backend is running!"}
 
+@app.head("/")
+async def root_head():
+    return {}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
