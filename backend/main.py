@@ -2,6 +2,7 @@ import sys
 import os
 import json
 import httpx
+import re
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import StreamingResponse, HTMLResponse
@@ -400,36 +401,40 @@ async def process_submission(
 # Orchestrator Agent — The "Brain" 
 # ---------------------------------------------------------
 
-def detect_intent(user_text: str):
+def detect_intent(user_text: str, chat_history: str = ""):
     """
     Fast hybrid intent classification ('query' vs 'apply') and scheme resolution.
+    Incorporates past chat history to resolve pronouns ('usme', 'isme', 'that scheme').
     Returns: {"intent": "query"|"apply", "scheme_id": str|None}
     """
     text_lower = user_text.lower()
     
-    # Quick scheme matching
+    # Quick scheme matching from text
     detected_scheme = None
     if "pmay-g" in text_lower or "gramin" in text_lower:
         detected_scheme = "pmay-g"
     elif "pmay-u" in text_lower or "urban" in text_lower:
         detected_scheme = "pmay-u"
-    elif "awas" in text_lower or "housing" in text_lower or "makaan" in text_lower or "ghar" in text_lower:
+    elif "awas" in text_lower or "housing" in text_lower or "makaan" in text_lower or "pmay" in text_lower or "ghar" in text_lower:
         detected_scheme = "pmay-g"
     elif "jan dhan" in text_lower or "pmjdy" in text_lower or "bank" in text_lower:
         detected_scheme = "pmjdy"
     elif "rhiss" in text_lower or "subsidy" in text_lower:
         detected_scheme = "rhiss"
 
-    # Fast Groq intent classification (~0.3s)
+    # Fast Groq intent classification (~0.3s) with context
     try:
         scheme_list = get_scheme_list_for_prompt()
         prompt = f"""Classify user intent:
+Recent Conversation History:
+{chat_history or "None"}
+
 User message: "{user_text}"
 Schemes: {scheme_list}
 
 Rules:
-- "intent": "apply" if user wants to submit/register/apply/fill form, else "query".
-- "scheme_id": scheme key or null.
+- "intent": "apply" ONLY if citizen explicitly states they want to submit/register/start application now. If asking about documents, eligibility, info, or process, set "intent": "query".
+- "scheme_id": scheme key (e.g. pmay-g, pmjdy) or null. Resolve relative references like "usme", "isme", "uske liye", "that scheme" from Recent Conversation History.
 
 Respond ONLY with valid JSON: {{"intent": "query_or_apply", "scheme_id": "scheme_id_or_null"}}"""
 
@@ -457,18 +462,28 @@ Respond ONLY with valid JSON: {{"intent": "query_or_apply", "scheme_id": "scheme
     except Exception as e:
         print(f"⚠️ Fast intent detection notice: {e}")
 
-    # Pure heuristic fallback
-    is_apply = any(kw in text_lower for kw in ["apply", "avedan", "aavedan", "register", "submit", "form bhar"])
+    # Pure heuristic fallback:
+    # If the user is asking questions about documents/eligibility/how-to:
+    is_question = any(kw in text_lower for kw in [
+        "kya", "kay", "kaise", "document", "documents", "chahiye", "chahiyen", 
+        "lagan", "lagenge", "batao", "bataiye", "list", "what", "which", "how", "eligibility", "patrata"
+    ])
+    is_explicit_apply = any(kw in text_lower for kw in [
+        "mujhe apply karna hai", "apply now", "form bhar do", "form bharna hai", "register me", "start apply"
+    ])
+    
+    intent = "query" if is_question or not is_explicit_apply else "apply"
+
     return {
-        "intent": "apply" if is_apply else "query",
+        "intent": intent,
         "scheme_id": detected_scheme
     }
 
 
-async def async_detect_intent(user_text: str):
+async def async_detect_intent(user_text: str, chat_history: str = ""):
     import asyncio
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, detect_intent, user_text)
+    return await loop.run_in_executor(None, lambda: detect_intent(user_text, chat_history))
 
 def extract_user_details(ocr_text: str):
     prompt = f"""You are a data extraction assistant. Extract personal details from the following OCR text of uploaded documents to fill a government scheme application form.
@@ -763,6 +778,22 @@ async def ivr_handle_speech(request: Request):
 </Response>"""
         return Response(content=twiml, media_type="application/xml")
 
+def is_indic_language(text: str, chat_history: str = "") -> bool:
+    combined_text = (text + " " + chat_history).lower()
+    if not combined_text.strip():
+        return False
+    if any(char in combined_text for char in "अआइईउऊएऐओऔकखगघचछजझटठडढणतथदधनपफबभमयरलवशषसह"):
+        return True
+    hinglish_words = {
+        "kay", "kya", "kaise", "bare", "baare", "batao", "bataiye", "chahiye", "chahiyen", 
+        "avedan", "aavedan", "usme", "isme", "kon", "kiska", "kab", "kaha", "sakte", "hai", 
+        "hain", "ke", "ki", "ko", "se", "me", "mein", "ka", "ghar", "makaan", "bata", "hun", 
+        "hoon", "dijiye", "bhej", "rahe", "raha", "kaun", "yojna", "yojana", "documents", "document",
+        "lagenge", "patrata", "madad"
+    }
+    words = set(re.findall(r'\b\w+\b', combined_text))
+    return len(words.intersection(hinglish_words)) > 0
+
 @app.post("/api/agent")
 async def agent_orchestrator(
     user_text: str = Form(...),
@@ -777,48 +808,92 @@ async def agent_orchestrator(
     stored_profile = storage_service.get_user_profile(user_id) or {}
     print(f"👤 Stored profile for {user_id}: {list(stored_profile.keys())}")
     
-    # Save user message
+    # Fetch session context memory for multi-turn chat
+    past_messages = []
+    last_scheme = None
+    chat_history_str = ""
+    
+    if session_id:
+        past_messages = storage_service.get_session_messages(session_id)
+        if past_messages:
+            recent_turns = []
+            for msg in past_messages[-6:]:
+                role = "Citizen" if msg.get("role") == "user" else "Assistant"
+                recent_turns.append(f"{role}: {msg.get('content', '')}")
+            chat_history_str = "\n".join(recent_turns)
+            
+            # Infer scheme from past conversation history
+            for msg in reversed(past_messages):
+                txt = msg.get("content", "").lower()
+                if "pmay-g" in txt or "gramin" in txt:
+                    last_scheme = "pmay-g"
+                    break
+                elif "pmay-u" in txt or "urban" in txt:
+                    last_scheme = "pmay-u"
+                    break
+                elif "awas" in txt or "housing" in txt or "makaan" in txt or "pmay" in txt:
+                    last_scheme = "pmay-g"
+                    break
+                elif "jan dhan" in txt or "pmjdy" in txt:
+                    last_scheme = "pmjdy"
+                    break
+                elif "rhiss" in txt:
+                    last_scheme = "rhiss"
+                    break
+
+    # Save user message AFTER reading past session history
     if session_id:
         title = user_text[:50] + "..." if len(user_text) > 50 else user_text
         storage_service.save_chat_message(session_id, user_id, title, "user", user_text)
     
-    # Text-based logic remains similar...
-    is_hindi = any(char in user_text for char in "अआइईउऊएऐओऔ")
+    is_indic = is_indic_language(user_text, chat_history_str)
     
     print(f"\n{'='*50}")
     print(f"🤖 AGENT REQUEST: text='{user_text}', files={len(documents) if documents else 0}, scheme_id={scheme_id}")
     print(f"{'='*50}")
     
-    # Step 1: Detect intent
-    intent_result = await async_detect_intent(user_text)
+    # Step 1: Detect intent & scheme (incorporating session memory)
+    intent_result = await async_detect_intent(user_text, chat_history_str)
     detected_intent = intent_result["intent"]
-    detected_scheme = scheme_id or intent_result["scheme_id"]  # explicit > detected
+    detected_scheme = scheme_id or intent_result["scheme_id"] or last_scheme  # explicit > detected > inherited
     
-    print(f"🎯 Intent: {detected_intent}, Scheme: {detected_scheme}")
+    print(f"🎯 Intent: {detected_intent}, Scheme: {detected_scheme} (inherited: {last_scheme})")
     
     # --------------------------------------------------
     # ROUTE 1: User is asking questions → Knowledge Agent (RAG)
     # --------------------------------------------------
     if detected_intent == "query" and not documents:
-        retrieved_facts = await async_high_quality_search(user_text)
+        # Enrich search query with scheme context if available
+        search_query = user_text
+        if detected_scheme and detected_scheme in SCHEME_REGISTRY:
+            search_query = f"{SCHEME_REGISTRY[detected_scheme]['name']} {user_text}"
+
+        retrieved_facts = await async_high_quality_search(search_query)
         context_string = "\n\n---\n\n".join(retrieved_facts)
         
         if not context_string:
             context_string = "No specific scheme guidelines were found for this query."
         
-        system_prompt = f"""You are a helpful, empathetic caseworker for Yojana-Setu, assisting rural citizens in India.
-Answer their question clearly and simply based ONLY on these facts:
+        scheme_name_str = SCHEME_REGISTRY.get(detected_scheme, {}).get('name', 'Government Scheme')
 
+        system_prompt = f"""You are a helpful, empathetic caseworker for Yojana-Setu, assisting rural citizens in India.
+
+RECENT CONVERSATION HISTORY WITH THIS CITIZEN:
+{chat_history_str or "First message in session."}
+
+TARGET SCHEME CONTEXT:
+{scheme_name_str}
+
+OFFICIAL FACTS & GUIDELINES:
 {context_string}
 
-IMPORTANT GUIDELINES:
-- When a user asks about documents needed, required information, or how to apply, give a DETAILED and STRUCTURED answer.
-- List ALL specific form fields they need to fill (e.g., Full Name, Father's Name, Date of Birth, Gender, Aadhaar Number, Mobile Number, Category, Income, Address, State, District, PIN Code etc.).
-- Mention exact document requirements including accepted file formats (JPG, PNG, PDF) and maximum file sizes (2MB for documents, 1MB for photos).
-- For fields with dropdown options (like Gender, Category, State), list the available options.
-- Use numbered sections and bullet points for clarity.
-- If the user seems interested in applying, let them know you can help them apply by uploading their documents.
-Do not use jargon. Be warm and encouraging."""
+CRITICAL RULES:
+- The citizen's message is: "{user_text}"
+- Understand pronouns/references like "usme", "uske liye", "isme", "documents kya hain" as referring directly to {scheme_name_str} (discussed in previous messages).
+- LANGUAGE & DIALECT REQUIREMENT: You MUST respond in the EXACT SAME LANGUAGE and dialect as the citizen's message ("{user_text}").
+- If the user writes in Hinglish (Hindi in Roman script), respond in warm, natural, friendly Hinglish. If Hindi in Devanagari script, respond in Hindi. If in English, respond in English.
+- Give a clear, structured answer with bullet points if listing required documents or form fields.
+- Do NOT output <think> tags or internal reasoning."""
 
         async def stream_with_metadata():
             # Send intent metadata first so the client knows the route
@@ -826,7 +901,6 @@ Do not use jargon. Be warm and encouraging."""
             
             full_response_content = ""
             async for chunk in get_sarvam_stream(system_prompt, user_text):
-                # Extract content from chunk for saving
                 if chunk.startswith("data:"):
                     try:
                         data = json.loads(chunk[5:].strip())
@@ -839,7 +913,6 @@ Do not use jargon. Be warm and encouraging."""
             if session_id and full_response_content:
                 storage_service.save_chat_message(session_id, user_id, "chat", "assistant", full_response_content)
 
-
         return StreamingResponse(
             stream_with_metadata(),
             media_type="text/event-stream",
@@ -851,7 +924,11 @@ Do not use jargon. Be warm and encouraging."""
     # --------------------------------------------------
     if detected_intent == "apply" and not documents:
         if not detected_scheme:
-            agent_response_text = "I'd love to help you apply! Which scheme would you like to apply for? You can say the scheme name and I'll guide you."
+            if is_indic:
+                agent_response_text = "Main aapki yojana ke liye aavedan (apply) karne mein zaroor madad karunga! Aap kis yojana ke liye apply karna chahte hain? (Jaise Pradhan Mantri Awas Yojana ya Jan Dhan Yojana)"
+            else:
+                agent_response_text = "I'd love to help you apply! Which scheme would you like to apply for? You can say the scheme name and I'll guide you."
+            
             if session_id:
                 storage_service.save_chat_message(session_id, user_id, "chat", "assistant", agent_response_text)
             return {
@@ -863,7 +940,10 @@ Do not use jargon. Be warm and encouraging."""
         
         scheme = SCHEME_REGISTRY.get(detected_scheme)
         if not scheme:
-            agent_response_text = "I didn't recognize that scheme. Which one do you want to apply for?"
+            if is_indic:
+                agent_response_text = f"Mujhe '{detected_scheme}' yojana ke baare mein jankari nahi mili. Aap kis yojana ke liye apply karna chahte hain?"
+            else:
+                agent_response_text = f"I didn't recognize that scheme. Which one do you want to apply for?"
             if session_id:
                 storage_service.save_chat_message(session_id, user_id, "chat", "assistant", agent_response_text)
             return {
@@ -876,8 +956,8 @@ Do not use jargon. Be warm and encouraging."""
         scheme_name = scheme["name"]
         doc_names = ", ".join([d.upper() + " Card" for d in scheme["required_docs"]])
         
-        if is_hindi:
-            response = f"Zaroor! {scheme_name} ke liye aapko {doc_names} upload karne honge. Kripya apne documents bhej dijiye."
+        if is_indic:
+            response = f"Zaroor! {scheme_name} ke liye aapko ye documents upload karne honge: {doc_names}. Kripya apne documents yahan upload karein."
         else:
             response = f"Great! To apply for {scheme_name}, please upload the following documents: {doc_names}."
         
@@ -899,16 +979,17 @@ Do not use jargon. Be warm and encouraging."""
     if documents:
         # Resolve scheme
         if not detected_scheme:
+            resp = "Mujhe yojana ka naam nahi mila. Kripya bataiye aap kis yojana ke liye documents upload kar rahe hain." if is_indic else "I see you've uploaded documents, but I'm not sure which scheme you want to apply for. Please specify the scheme name or ID."
             return {
                 "intent": "apply",
                 "action": "clarify_scheme",
-                "response": "I see you've uploaded documents, but I'm not sure which scheme you want to apply for. Please specify the scheme name or ID.",
+                "response": resp,
                 "available_schemes": {k: v["name"] for k, v in SCHEME_REGISTRY.items()}
             }
         
         scheme = SCHEME_REGISTRY.get(detected_scheme)
         if not scheme:
-            if is_hindi:
+            if is_indic:
                 resp = f"Maaf kijiye, mujhe '{detected_scheme}' nam ki koi scheme nahi mili. Kya aap dobara bata sakte hain?"
             else:
                 resp = f"Unknown scheme '{detected_scheme}'. Please specify another."
@@ -945,7 +1026,7 @@ Do not use jargon. Be warm and encouraging."""
                 for p in temp_paths:
                     if os.path.exists(p):
                         os.remove(p)
-                if is_hindi:
+                if is_indic:
                     resp = f"{doc_type} check karne mein dikkat hui: {validation.get('error', 'Unknown error')}. Kripya saaf photo upload karein."
                 else:
                     resp = f"Document validation failed for {doc_type}: {validation.get('error', 'Unknown error')}. Please upload a clearer document."
