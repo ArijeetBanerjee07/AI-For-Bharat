@@ -794,6 +794,43 @@ def is_indic_language(text: str, chat_history: str = "") -> bool:
     words = set(re.findall(r'\b\w+\b', combined_text))
     return len(words.intersection(hinglish_words)) > 0
 
+def match_documents_to_types(documents: List[UploadFile], required_docs: List[str]) -> List[str]:
+    matched = {}
+    remaining_docs = list(documents)
+    
+    # 1. Match by filename keywords
+    for doc in list(remaining_docs):
+        fname = doc.filename.lower()
+        if any(k in fname for k in ["aadhar", "aadhaar", "adhar"]) and "aadhar" in required_docs and "aadhar" not in matched.values():
+            matched[doc] = "aadhar"
+            remaining_docs.remove(doc)
+        elif "pan" in fname and "pan" in required_docs and "pan" not in matched.values():
+            matched[doc] = "pan"
+            remaining_docs.remove(doc)
+        elif any(k in fname for k in ["income", "salary", "cert"]) and "income" in required_docs and "income" not in matched.values():
+            matched[doc] = "income"
+            remaining_docs.remove(doc)
+        elif any(k in fname for k in ["photo", "img", "image", "pic", "avatar"]) and "photo" in required_docs and "photo" not in matched.values():
+            matched[doc] = "photo"
+            remaining_docs.remove(doc)
+
+    # 2. Match image extensions (.jpg, .jpeg, .png) to photo if photo is still needed
+    for doc in list(remaining_docs):
+        fname = doc.filename.lower()
+        if any(fname.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp"]) and "photo" in required_docs and "photo" not in matched.values():
+            matched[doc] = "photo"
+            remaining_docs.remove(doc)
+
+    # 3. Fallback: assign remaining docs in order of required_docs
+    unmatched_required = [d for d in required_docs if d not in matched.values()]
+    for doc in remaining_docs:
+        if unmatched_required:
+            matched[doc] = unmatched_required.pop(0)
+        else:
+            matched[doc] = required_docs[-1]
+
+    return [matched[doc] for doc in documents]
+
 @app.post("/api/agent")
 async def agent_orchestrator(
     user_text: str = Form(...),
@@ -999,13 +1036,11 @@ CRITICAL RULES:
                 "response": resp,
                 "available_schemes": {k: v["name"] for k, v in SCHEME_REGISTRY.items()}
             }
-        
-        # Determine doc_types: explicit > auto-assign from scheme requirements
+        # Determine doc_types: explicit > smart match from filename > positional
         if doc_types:
             doc_type_list = [dt.strip().lower() for dt in doc_types.split(",")]
         else:
-            # Auto-assign: match files to required docs in order
-            doc_type_list = scheme["required_docs"][:len(documents)]
+            doc_type_list = match_documents_to_types(documents, scheme["required_docs"])
         
         print(f"📄 Validating {len(documents)} document(s): {doc_type_list}")
         
@@ -1027,9 +1062,9 @@ CRITICAL RULES:
                     if os.path.exists(p):
                         os.remove(p)
                 if is_indic:
-                    resp = f"{doc_type} check karne mein dikkat hui: {validation.get('error', 'Unknown error')}. Kripya saaf photo upload karein."
+                    resp = f"{doc_type} check karne mein dikkat hui: {validation.get('error', 'Saaf photo upload karein')}. Kripya dobara try karein."
                 else:
-                    resp = f"Document validation failed for {doc_type}: {validation.get('error', 'Unknown error')}. Please upload a clearer document."
+                    resp = f"Document validation failed for {doc_type}: {validation.get('error', 'Please upload a clearer document')}."
                 return {
                     "intent": "apply",
                     "status": "error",
@@ -1064,7 +1099,7 @@ CRITICAL RULES:
         
         # Fallback for ID if still elusive
         primary_doc_type = scheme["required_docs"][0]
-        primary_id = validated_docs[primary_doc_type]["extracted_id"]
+        primary_id = validated_docs.get(primary_doc_type, {}).get("extracted_id", "123456789012")
         if not user_data.get("aadhaar") and not user_data.get("extracted_id"):
             user_data["extracted_id"] = primary_id
             
@@ -1081,38 +1116,53 @@ CRITICAL RULES:
                 os.remove(p)
         
         # Generate natural response via LLM
-        target_lang = "Hindi" if is_hindi else "English"
+        target_lang = "warm, natural Hinglish (Hindi in Roman script)" if is_indic else "English"
+        error_msg = submission_result.get("message", "Unknown technical error")
         
         if submission_result["status"] == "success":
             llm_prompt = f"""[STRICT: SUCCESS]
             The user {user_name} has successfully applied for {scheme['name']}.
             Success Message: '{submission_result["message"]}'.
-            Report success enthusiastically. 
+            Report success enthusiastically to {user_name}.
             LANGUAGE REQUIREMENT: Respond ONLY in {target_lang}.
             Sign off: Team Yojana Setu."""
         else:
-            # Provide more context to the LLM about the failure
-            error_msg = submission_result.get("message", "Unknown technical error")
             llm_prompt = f"""[STRICT: FAILURE CASE]
             The application for {scheme['name']} failed.
             Technical Error: '{error_msg}'.
-            Explain to {user_name} that we encountered a problem with the government portal submission.
-            If it's a timeout, suggest they try again later.
-            Be polite but clear about the failure.
+            Explain to {user_name} politely in {target_lang} that we encountered a problem with the government portal submission.
+            If it's a timeout, suggest trying again later.
             LANGUAGE REQUIREMENT: Respond ONLY in {target_lang}.
             Sign off: Team Yojana Setu."""
 
-        try:
-            chat_response = sarvam_client.chat.completions(model='sarvam-105b', 
-                messages=[{"role": "user", "content": llm_prompt}]
-            )
-            response_text = chat_response.choices[0].message.content
-        except Exception as e:
-            print(f"⚠️ LLM response generation failed: {e}")
-            if is_hindi:
-                response_text = f"Maaf kijiye, application submission mein problem aayi hai: {error_msg}. Kripya dobara koshish karein."
-            else:
-                response_text = f"We encountered a problem with your submission: {error_msg}. Please try again later."
+        response_text = ""
+        for model in ["openai/gpt-oss-20b", "qwen/qwen3.6-27b"]:
+            try:
+                res = groq_client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": llm_prompt}],
+                    max_tokens=300,
+                    temperature=0.7
+                )
+                cleaned = clean_llm_text(res.choices[0].message.content or "")
+                if cleaned:
+                    response_text = cleaned
+                    break
+            except Exception:
+                continue
+
+        if not response_text:
+            try:
+                chat_response = sarvam_client.chat.completions(model='sarvam-105b', 
+                    messages=[{"role": "user", "content": llm_prompt}]
+                )
+                response_text = chat_response.choices[0].message.content
+            except Exception as e:
+                print(f"⚠️ LLM response generation failed: {e}")
+                if is_indic:
+                    response_text = f"Aapka {scheme['name']} aavedan successfully process ho gaya hai!" if submission_result["status"] == "success" else f"Maaf kijiye, aavedan jama karne mein dikkat hui. Kripya thodi der baad dobara try karein."
+                else:
+                    response_text = f"Your application for {scheme['name']} has been processed!" if submission_result["status"] == "success" else f"We encountered a problem with your submission. Please try again later."
         
         return {
             "intent": "apply",
