@@ -152,60 +152,69 @@ def clean_llm_text(text: str) -> str:
     if "</think>" in text:
         text = text.split("</think>")[-1]
     elif "<think>" in text:
-        text = text.split("<think>")[0]
+        lines = text.splitlines()
+        filtered = [l for l in lines if not l.strip().startswith("<think>") and "thinking process" not in l.lower()]
+        text = "\n".join(filtered)
     return text.strip()
 
 async def get_sarvam_stream(system_prompt: str, user_query: str):
     content = ""
-    try:
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: sarvam_client.chat.completions(
-                model='sarvam-105b',
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_query}
-                ]
-            )
-        )
-        if response and hasattr(response, 'choices') and len(response.choices) > 0:
-            content = response.choices[0].message.content or ""
-    except Exception as e:
-        print(f"⚠️ Sarvam Stream Error: {type(e)} - {e}. Attempting fallback to Groq...")
+    loop = asyncio.get_event_loop()
 
-    if not content:
-        # Fallback to Groq LLM with models supported on this account
-        for groq_model in ["qwen/qwen3.6-27b", "openai/gpt-oss-20b", "groq/compound-mini"]:
-            try:
-                loop = asyncio.get_event_loop()
-                groq_response = await loop.run_in_executor(
-                    None,
-                    lambda: groq_client.chat.completions.create(
-                        model=groq_model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_query}
-                        ],
-                        temperature=0.7,
-                        max_tokens=800
-                    )
+    # Step 1: Try ultra-fast Groq models first for lightning response (<1s)
+    groq_models = ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "qwen/qwen3.6-27b", "allam-2-7b"]
+    for model_name in groq_models:
+        try:
+            groq_response = await loop.run_in_executor(
+                None,
+                lambda m=model_name: groq_client.chat.completions.create(
+                    model=m,
+                    messages=[
+                        {"role": "system", "content": system_prompt + "\nDo NOT output <think> tags or reasoning. Output ONLY the response."},
+                        {"role": "user", "content": user_query}
+                    ],
+                    temperature=0.6,
+                    max_tokens=1200
                 )
-                if groq_response and groq_response.choices:
-                    content = groq_response.choices[0].message.content or ""
-                    if content:
-                        break
-            except Exception as g_err:
-                print(f"⚠️ Groq stream fallback model {groq_model} failed: {type(g_err)} - {g_err}")
+            )
+            if groq_response and groq_response.choices:
+                text = groq_response.choices[0].message.content or ""
+                cleaned = clean_llm_text(text)
+                if cleaned:
+                    content = cleaned
+                    print(f"⚡ Fast response via Groq [{model_name}]")
+                    break
+        except Exception as g_err:
+            print(f"⚠️ Groq model {model_name} failed: {g_err}")
 
-    content = clean_llm_text(content)
+    # Step 2: If Groq failed, fallback to Sarvam AI LLM
+    if not content:
+        try:
+            print("🔄 Falling back to Sarvam AI sarvam-105b...")
+            response = await loop.run_in_executor(
+                None,
+                lambda: sarvam_client.chat.completions(
+                    model='sarvam-105b',
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_query}
+                    ]
+                )
+            )
+            if response and hasattr(response, 'choices') and len(response.choices) > 0:
+                text = response.choices[0].message.content or ""
+                content = clean_llm_text(text)
+        except Exception as s_err:
+            print(f"⚠️ Sarvam Stream Error: {s_err}")
 
     if content:
         yield f"data: {json.dumps({'content': content}, ensure_ascii=False)}\n\n"
     else:
-        yield f"data: {json.dumps({'error': 'Failed to generate LLM response from primary and fallback models.'})}\n\n"
+        yield f"data: {json.dumps({'error': 'Maaf kijiye, server busy hai. Kripya thodi der baad dobara sawal puchein.'})}\n\n"
 
     yield "data: [DONE]\n\n"
+
+
 
 
 
@@ -393,53 +402,68 @@ async def process_submission(
 
 def detect_intent(user_text: str):
     """
-    Uses Sarvam LLM to classify user intent and extract scheme info.
+    Fast hybrid intent classification ('query' vs 'apply') and scheme resolution.
     Returns: {"intent": "query"|"apply", "scheme_id": str|None}
     """
-    scheme_list = get_scheme_list_for_prompt()
+    text_lower = user_text.lower()
     
-    prompt = f"""You are an intent classifier for a government scheme assistant.
+    # Quick scheme matching
+    detected_scheme = None
+    if "pmay-g" in text_lower or "gramin" in text_lower:
+        detected_scheme = "pmay-g"
+    elif "pmay-u" in text_lower or "urban" in text_lower:
+        detected_scheme = "pmay-u"
+    elif "awas" in text_lower or "housing" in text_lower or "makaan" in text_lower or "ghar" in text_lower:
+        detected_scheme = "pmay-g"
+    elif "jan dhan" in text_lower or "pmjdy" in text_lower or "bank" in text_lower:
+        detected_scheme = "pmjdy"
+    elif "rhiss" in text_lower or "subsidy" in text_lower:
+        detected_scheme = "rhiss"
 
-Analyze the user's message and determine:
-1. Their INTENT: either "query" (asking questions) or "apply" (wants to apply/submit/register)
-2. The SCHEME they're referring to (if any)
-
-Available schemes:
-{scheme_list}
-
-User message: "{user_text}"
-
-RESPOND WITH ONLY THIS EXACT JSON FORMAT, nothing else:
-{{"intent": "query_or_apply", "scheme_id": "scheme_id_or_null"}}
-
-Examples:
-- "Tell me about PM Awas Yojana" → {{"intent": "query", "scheme_id": "pmay-g"}}
-- "I want to apply for housing scheme" → {{"intent": "apply", "scheme_id": "pmay-g"}}
-- "Yes, please help me apply" → {{"intent": "apply", "scheme_id": null}}
-- "What documents do I need?" → {{"intent": "query", "scheme_id": null}}
-- "Submit my application for Jan Dhan" → {{"intent": "apply", "scheme_id": "pmjdy"}}"""
-
-    response = sarvam_client.chat.completions(model='sarvam-105b', 
-        messages=[{"role": "user", "content": prompt}]
-    )
-    
-    raw = response.choices[0].message.content.strip()
-    print(f"🧠 Intent Detection Raw: {raw}")
-    
-    # Parse JSON from response
+    # Fast Groq intent classification (~0.3s)
     try:
-        # Handle cases where LLM wraps JSON in markdown code blocks
-        if "```" in raw:
-            raw = raw.split("```")[1].replace("json", "").strip()
-        result = json.loads(raw)
-        return {
-            "intent": result.get("intent", "query"),
-            "scheme_id": result.get("scheme_id") if result.get("scheme_id") != "null" else None
-        }
-    except (json.JSONDecodeError, IndexError):
-        # Default to query if parsing fails
-        print(f"⚠️ Intent parse failed, defaulting to query")
-        return {"intent": "query", "scheme_id": None}
+        scheme_list = get_scheme_list_for_prompt()
+        prompt = f"""Classify user intent:
+User message: "{user_text}"
+Schemes: {scheme_list}
+
+Rules:
+- "intent": "apply" if user wants to submit/register/apply/fill form, else "query".
+- "scheme_id": scheme key or null.
+
+Respond ONLY with valid JSON: {{"intent": "query_or_apply", "scheme_id": "scheme_id_or_null"}}"""
+
+        for model in ["openai/gpt-oss-20b", "qwen/qwen3.6-27b"]:
+            try:
+                res = groq_client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=60,
+                    temperature=0.1
+                )
+                raw = clean_llm_text(res.choices[0].message.content or "")
+                if "```" in raw:
+                    raw = raw.split("```")[1].replace("json", "").strip()
+                result = json.loads(raw)
+                s_id = result.get("scheme_id")
+                if s_id in ["null", "None", "", None]:
+                    s_id = detected_scheme
+                return {
+                    "intent": result.get("intent", "query"),
+                    "scheme_id": s_id
+                }
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"⚠️ Fast intent detection notice: {e}")
+
+    # Pure heuristic fallback
+    is_apply = any(kw in text_lower for kw in ["apply", "avedan", "aavedan", "register", "submit", "form bhar"])
+    return {
+        "intent": "apply" if is_apply else "query",
+        "scheme_id": detected_scheme
+    }
+
 
 async def async_detect_intent(user_text: str):
     import asyncio
