@@ -75,7 +75,7 @@ SCHEME_REGISTRY = {
     "rhiss": {
         "name": "Rural Housing Interest Subsidy Scheme (RHISS)",
         "required_docs": ["aadhar"],
-        "portal_url": "http://127.0.0.1:8000/mock-gov-portal",
+        "portal_url": "https://ai-for-bharat-backend.onrender.com/mock-gov-portal",
         "description": "Housing scheme for rural areas"
     },
 }
@@ -292,7 +292,8 @@ Do NOT include the [APPLY_READY:...] tag if the user is just asking questions an
 
     return StreamingResponse(
         get_sarvam_stream(system_prompt, user_query), 
-        media_type="text/event-stream"
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
     )
 
 @app.post("/api/submit-application")
@@ -756,7 +757,8 @@ Do not use jargon. Be warm and encouraging."""
 
         return StreamingResponse(
             stream_with_metadata(),
-            media_type="text/event-stream"
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
         )
     
     # --------------------------------------------------

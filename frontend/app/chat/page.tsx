@@ -35,6 +35,9 @@ export default function ChatPage() {
     const audioChunksRef = useRef<Blob[]>([]);
 
     useEffect(() => {
+        // Ping backend silently to wake up Render container if sleeping
+        fetch(`${API_BASE_URL}/`).catch(() => {});
+
         const phone = localStorage.getItem('user_phone');
         const name = localStorage.getItem('user_name');
         const fallbackName = name ? name : "Guest";
@@ -143,6 +146,10 @@ export default function ChatPage() {
                 body: formData,
             });
 
+            if (!response.ok) {
+                throw new Error(`Server returned status ${response.status}`);
+            }
+
             const data = await response.json();
             setMessages(prev => {
                 const newMessages = [...prev];
@@ -157,6 +164,14 @@ export default function ChatPage() {
             }
         } catch (error) {
             console.error('Voice Error:', error);
+            setMessages(prev => {
+                const newMessages = [...prev];
+                newMessages[newMessages.length - 1] = { 
+                    role: 'assistant', 
+                    content: '⚠️ Voice processing server error. Backend may be waking up from sleep. Please try again in a few seconds.' 
+                };
+                return newMessages;
+            });
         } finally {
             setIsLoading(false);
         }
@@ -211,6 +226,10 @@ export default function ChatPage() {
                 method: 'POST',
                 body: formData,
             });
+
+            if (!response.ok) {
+                throw new Error(`Server returned status ${response.status}`);
+            }
 
             const contentType = response.headers.get('content-type') || '';
 
@@ -270,6 +289,14 @@ export default function ChatPage() {
             }
         } catch (error) {
             console.error('Chat Error:', error);
+            setMessages(prev => {
+                const newMessages = [...prev];
+                newMessages[newMessages.length - 1] = { 
+                    role: 'assistant', 
+                    content: '⚠️ Could not connect to Yojana-Setu server. Render backend may be waking up from sleep (~30s). Please try sending your message again in a moment.' 
+                };
+                return newMessages;
+            });
         } finally {
             setIsLoading(false);
         }
