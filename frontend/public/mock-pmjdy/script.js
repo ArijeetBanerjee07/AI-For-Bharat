@@ -175,12 +175,12 @@ document.addEventListener('DOMContentLoaded', () => {
             btnText.classList.remove('hidden');
             btnLoader.classList.add('hidden');
 
-            const ref = 'PMJDY-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).substr(2, 4).toUpperCase();
+            const ref = window.__customRefNumber || ('PMJDY-' + Date.now().toString(36).toUpperCase() + '-' + Math.random().toString(36).substr(2, 4).toUpperCase());
             refNumber.textContent = ref;
 
             successOverlay.classList.add('show');
             document.body.style.overflow = 'hidden';
-        }, 2000);
+        }, 1000);
     });
 
     successCloseBtn.addEventListener('click', () => {
@@ -329,25 +329,36 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 window.addEventListener('message', async (event) => {
-    if (event.data.type === 'AUTO_FILL') {
+    if (event.data && (event.data.type === 'AUTO_FILL' || event.data.type === 'AUTO_FILL_AND_SUBMIT')) {
         const data = event.data.payload || {};
+        if (event.data.ref_number) {
+            window.__customRefNumber = event.data.ref_number;
+        }
+
+        if (window.__isAutoFilling) return;
+        window.__isAutoFilling = true;
+
         const delay = (ms) => new Promise(res => setTimeout(res, ms));
         const typeText = async (id, text) => {
             const el = document.getElementById(id);
-            if (el) {
+            if (el && text !== undefined && text !== null) {
                 el.value = '';
-                for (let i = 0; i < text.length; i++) {
-                    el.value += text[i];
-                    await delay(50);
+                const strText = String(text);
+                for (let i = 0; i < strText.length; i++) {
+                    el.value += strText[i];
+                    await delay(15);
                 }
+                el.dispatchEvent(new Event('input', { bubbles: true }));
             }
         };
         const setSelect = (id, val) => {
             const el = document.getElementById(id);
-            if (el) {
+            if (el && val) {
+                const strVal = String(val).toLowerCase();
                 for (let i = 0; i < el.options.length; i++) {
-                    if (el.options[i].value.toLowerCase().includes(val.toLowerCase()) || el.options[i].text.toLowerCase().includes(val.toLowerCase())) {
+                    if (el.options[i].value.toLowerCase().includes(strVal) || el.options[i].text.toLowerCase().includes(strVal)) {
                         el.selectedIndex = i;
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
                         break;
                     }
                 }
@@ -355,10 +366,10 @@ window.addEventListener('message', async (event) => {
         };
 
         // Step 1
-        if (data.name || data.username) await typeText('fullName', data.name || data.username);
-        if (data.fathername) await typeText('fatherName', data.fathername);
+        if (data.fullName || data.fullname || data.name || data.username) await typeText('fullName', data.fullName || data.fullname || data.name || data.username);
+        if (data.fatherName || data.fathername) await typeText('fatherName', data.fatherName || data.fathername);
         if (data.dob) {
-            let dob = data.dob;
+            let dob = String(data.dob);
             if (dob.includes('/')) {
                 const parts = dob.split('/');
                 if (parts[0].length === 2 && parts[2].length === 4) {
@@ -366,48 +377,55 @@ window.addEventListener('message', async (event) => {
                 }
             }
             const dobEl = document.getElementById('dob');
-            if (dobEl) dobEl.value = dob;
-            await delay(50);
+            if (dobEl) {
+                dobEl.value = dob;
+                dobEl.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            await delay(20);
         }
         if (data.gender) setSelect('gender', data.gender);
-        if (data.aadhaar || data.aadhar) await typeText('aadhaarNumber', data.aadhaar || data.aadhar);
+        if (data.aadhaarNumber || data.aadhaar || data.aadhar || data.extracted_id) await typeText('aadhaarNumber', data.aadhaarNumber || data.aadhaar || data.aadhar || data.extracted_id);
         if (data.phone || data.mobile) await typeText('mobile', data.phone || data.mobile);
         if (data.address) await typeText('address', data.address);
-        if (data.state) setSelect('state', data.state.replace(' ', '_'));
+        if (data.state) setSelect('state', String(data.state).replace(/\s+/g, '_'));
         if (data.district) await typeText('district', data.district);
 
-        await delay(500);
+        await delay(250);
         const nextBtn1 = document.getElementById('nextStep1');
         if (nextBtn1) nextBtn1.click();
 
         // Step 2
-        await delay(500);
+        await delay(250);
         setSelect('occupation', data.occupation || 'Self Employed');
         if (data.income) await typeText('income', typeof data.income === 'string' ? data.income.replace(/\D/g, '') : data.income.toString());
         setSelect('existingAccount', data.existingAccount || 'No');
 
-        await delay(500);
+        await delay(250);
         const nextBtn2 = document.getElementById('nextStep2');
         if (nextBtn2) nextBtn2.click();
 
         // Step 3
-        await delay(500);
+        await delay(250);
         await typeText('nomineeName', data.nomineeName || 'Family Member');
         await typeText('nomineeRelation', data.nomineeRelation || 'Spouse');
         await typeText('nomineeAge', data.nomineeAge || '35');
 
-        await delay(500);
+        await delay(250);
         const nextBtn3 = document.getElementById('nextStep3');
         if (nextBtn3) nextBtn3.click();
 
         // Step 4 (Docs)
-        await delay(1000);
+        await delay(350);
         window.__autoFilledDocs = true;
 
         ['aadhaar', 'photo'].forEach(doc => {
             const wrapper = document.getElementById(`${doc}Dropzone`);
-            if (wrapper) wrapper.querySelector('.dropzone-content').classList.add('hidden');
-            if (wrapper) wrapper.querySelector('.dropzone-preview').classList.remove('hidden');
+            if (wrapper) {
+                const content = wrapper.querySelector('.dropzone-content');
+                const preview = wrapper.querySelector('.dropzone-preview');
+                if (content) content.classList.add('hidden');
+                if (preview) preview.classList.remove('hidden');
+            }
             const selEl = document.getElementById(`${doc}FileName`);
             if (selEl) selEl.textContent = `✅ auto-${doc}.pdf`;
         });
@@ -415,16 +433,23 @@ window.addEventListener('message', async (event) => {
         const cb = document.getElementById('declaration');
         if (cb) cb.checked = true;
 
-    } else if (event.data.type === 'AUTO_SUBMIT') {
-        const attemptSubmit = () => {
-            const cb = document.getElementById('declaration');
-            if (window.__autoFilledDocs && cb && cb.checked) {
-                const btn = document.getElementById('submitBtn');
-                if (btn) btn.click();
-            } else {
-                setTimeout(attemptSubmit, 500);
-            }
-        };
-        attemptSubmit();
+        await delay(350);
+        if (event.data.type === 'AUTO_FILL_AND_SUBMIT' || event.data.autoSubmit) {
+            const btn = document.getElementById('submitBtn');
+            if (btn) btn.click();
+        }
+
+        window.__isAutoFilling = false;
+    } else if (event.data && event.data.type === 'AUTO_SUBMIT') {
+        if (event.data.ref_number) {
+            window.__customRefNumber = event.data.ref_number;
+        }
+        const btn = document.getElementById('submitBtn');
+        if (btn) btn.click();
     }
 });
+
+// Notify parent frame that portal is loaded and ready for messages
+try {
+    window.parent.postMessage({ type: 'PORTAL_READY' }, '*');
+} catch (e) {}

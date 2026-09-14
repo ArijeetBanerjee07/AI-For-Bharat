@@ -340,6 +340,9 @@ function handleSubmit(e) {
 
 // ===== Reference Number Generator =====
 function generateRefNumber() {
+    if (window.__customRefNumber) {
+        return window.__customRefNumber;
+    }
     const year = new Date().getFullYear();
     const random = Math.random().toString(36).substring(2, 9).toUpperCase();
     return `PMAY-${year}-${random}`;
@@ -410,69 +413,86 @@ function createConfetti() {
         document.head.appendChild(style);
     }
 }
+
 window.addEventListener('message', async (event) => {
-    if (event.data.type === 'AUTO_FILL') {
-        const data = event.data.payload;
+    if (event.data && (event.data.type === 'AUTO_FILL' || event.data.type === 'AUTO_FILL_AND_SUBMIT')) {
+        const data = event.data.payload || {};
+        if (event.data.ref_number) {
+            window.__customRefNumber = event.data.ref_number;
+        }
+
+        if (window.__isAutoFilling) return;
+        window.__isAutoFilling = true;
+
         const delay = (ms) => new Promise(res => setTimeout(res, ms));
         const typeText = async (id, text) => {
             const el = document.getElementById(id);
-            if (el) {
+            if (el && text !== undefined && text !== null) {
                 el.value = '';
-                for (let i = 0; i < text.length; i++) {
-                    el.value += text[i];
-                    await delay(50);
+                const strText = String(text);
+                for (let i = 0; i < strText.length; i++) {
+                    el.value += strText[i];
+                    await delay(15);
                 }
+                el.dispatchEvent(new Event('input', { bubbles: true }));
             }
         };
         const setSelect = (id, val) => {
             const el = document.getElementById(id);
-            if (el) {
+            if (el && val) {
+                const strVal = String(val).toLowerCase();
                 for (let i = 0; i < el.options.length; i++) {
-                    if (el.options[i].value.toLowerCase().includes(val.toLowerCase()) || el.options[i].text.toLowerCase().includes(val.toLowerCase())) {
+                    if (el.options[i].value.toLowerCase().includes(strVal) || el.options[i].text.toLowerCase().includes(strVal)) {
                         el.selectedIndex = i;
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
                         break;
                     }
                 }
             }
         };
 
-        if (data.name || data.username) await typeText('fullname', data.name || data.username);
+        // Step 1
+        if (data.fullname || data.name || data.username) await typeText('fullname', data.fullname || data.name || data.username);
         if (data.fathername) await typeText('fathername', data.fathername);
         if (data.dob) {
-            // Ensure DOB is in YYYY-MM-DD format for HTML5 input type="date"
-            let dob = data.dob;
+            let dob = String(data.dob);
             if (dob.includes('/')) {
                 const parts = dob.split('/');
                 if (parts[0].length === 2 && parts[2].length === 4) {
-                    dob = `${parts[2]}-${parts[1]}-${parts[0]}`; // Convert DD/MM/YYYY to YYYY-MM-DD
+                    dob = `${parts[2]}-${parts[1]}-${parts[0]}`;
                 }
             }
             const dobEl = document.getElementById('dob');
-            if (dobEl) dobEl.value = dob; // Directly set value for date input, typing char by char doesn't work well
-            await delay(50);
+            if (dobEl) {
+                dobEl.value = dob;
+                dobEl.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            await delay(20);
         }
         if (data.gender) setSelect('gender', data.gender);
-        if (data.phone) await typeText('mobile', data.phone);
-        if (data.aadhaar || data.aadhar) await typeText('aadhaar', data.aadhaar || data.aadhar);
+        if (data.phone || data.mobile) await typeText('mobile', data.phone || data.mobile);
+        if (data.aadhaar || data.aadhar || data.extracted_id) await typeText('aadhaar', data.aadhaar || data.aadhar || data.extracted_id);
         if (data.category) setSelect('category', data.category);
         if (data.income) await typeText('income', typeof data.income === 'string' ? data.income.replace(/\D/g, '') : data.income.toString());
 
-        await delay(500);
+        await delay(250);
         const nextBtn1 = document.getElementById('btn-next-1');
         if (nextBtn1) nextBtn1.click();
 
-        await delay(500);
+        // Step 2
+        await delay(250);
         if (data.address) await typeText('address', data.address);
-        if (data.state) setSelect('state', data.state.replace(' ', '-'));
+        if (data.state) setSelect('state', String(data.state).replace(/\s+/g, '-'));
         if (data.district) await typeText('district', data.district);
         if (data.city) await typeText('city', data.city);
         if (data.pincode) await typeText('pincode', data.pincode);
 
-        await delay(500);
+        await delay(250);
         const nextBtn2 = document.getElementById('btn-next-2');
         if (nextBtn2) nextBtn2.click();
 
-        await delay(1000);
+        // Step 3
+        await delay(350);
         window.__autoFilledDocs = true;
 
         ['aadhaar', 'income', 'photo'].forEach(doc => {
@@ -484,17 +504,24 @@ window.addEventListener('message', async (event) => {
 
         const cb = document.getElementById('declaration');
         if (cb) cb.checked = true;
-    } else if (event.data.type === 'AUTO_SUBMIT') {
-        const attemptSubmit = () => {
-            const cb = document.getElementById('declaration');
-            if (window.__autoFilledDocs && cb && cb.checked) {
-                const btn = document.getElementById('btn-submit');
-                if (btn) btn.click();
-            } else {
-                // If backend responded faster than animation, wait and retry
-                setTimeout(attemptSubmit, 500);
-            }
-        };
-        attemptSubmit();
+
+        await delay(350);
+        if (event.data.type === 'AUTO_FILL_AND_SUBMIT' || event.data.autoSubmit) {
+            const btn = document.getElementById('btn-submit');
+            if (btn) btn.click();
+        }
+
+        window.__isAutoFilling = false;
+    } else if (event.data && event.data.type === 'AUTO_SUBMIT') {
+        if (event.data.ref_number) {
+            window.__customRefNumber = event.data.ref_number;
+        }
+        const btn = document.getElementById('btn-submit');
+        if (btn) btn.click();
     }
 });
+
+// Notify parent frame that portal is loaded and ready for messages
+try {
+    window.parent.postMessage({ type: 'PORTAL_READY' }, '*');
+} catch (e) {}

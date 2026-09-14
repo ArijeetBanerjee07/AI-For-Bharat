@@ -30,18 +30,18 @@ export default function BrowserIVR() {
                 audio.onplay = () => setCallState('speaking');
                 audio.onended = () => setCallState('connected');
 
-                await audio.play();
+                try {
+                    await audio.play();
+                } catch (playErr) {
+                    console.log("Autoplay policy deferred audio, set state connected", playErr);
+                    setCallState('connected');
+                }
             } else {
                 setCallState('connected');
             }
         } catch (err) {
             console.error("Welcome greeting error:", err);
-            // Fallback
-            const utt = new SpeechSynthesisUtterance("Namaste! Yojana Setu mein aapka swagat hai.");
-            utt.lang = 'hi-IN';
-            utt.onstart = () => setCallState('speaking');
-            utt.onend = () => setCallState('connected');
-            window.speechSynthesis.speak(utt);
+            setCallState('connected');
         }
     };
 
@@ -50,7 +50,7 @@ export default function BrowserIVR() {
             const t = setTimeout(() => {
                 setCallState('connected');
                 sayGreeting();
-            }, 2000); // 2 second ringing
+            }, 1500); // 1.5 second ringing
             return () => clearTimeout(t);
         }
     }, [callState]);
@@ -104,7 +104,7 @@ export default function BrowserIVR() {
                 stream.getTracks().forEach(track => track.stop());
                 setCallState('processing');
 
-                const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
+                const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
                 await sendAudioToAgent(audioBlob);
             };
 
@@ -118,14 +118,12 @@ export default function BrowserIVR() {
         }
     };
 
-    // Removed stopRecording as it's now handled by toggleRecording
-
     const sendAudioToAgent = async (audioBlob: Blob) => {
         const formData = new FormData();
         const user_name = localStorage.getItem('user_name') || 'Citizen';
 
-        // Convert Blob to File
-        const audioFile = new File([audioBlob], 'voice_query.wav', { type: 'audio/wav' });
+        // Convert Blob to File with proper webm extension
+        const audioFile = new File([audioBlob], 'voice_query.webm', { type: 'audio/webm' });
         formData.append('audio', audioFile);
         formData.append('user_name', user_name);
 
@@ -149,7 +147,12 @@ export default function BrowserIVR() {
                 audio.onplay = () => setCallState('speaking');
                 audio.onended = () => setCallState('connected');
 
-                await audio.play();
+                try {
+                    await audio.play();
+                } catch (pErr) {
+                    console.log("Audio play deferred by browser", pErr);
+                    setCallState('connected');
+                }
             } else {
                 setCallState('connected');
             }

@@ -108,6 +108,22 @@ export default function ChatPage() {
         }
     }, [detectedScheme]);
 
+    useEffect(() => {
+        const handleWindowMessage = (event: MessageEvent) => {
+            if (event.data && event.data.type === 'PORTAL_READY') {
+                if (lastPortalMsgRef.current) {
+                    const iframe = iframeRef.current || (document.querySelector('iframe') as HTMLIFrameElement);
+                    if (iframe && iframe.contentWindow) {
+                        iframe.contentWindow.postMessage(lastPortalMsgRef.current, '*');
+                    }
+                }
+            }
+        };
+
+        window.addEventListener('message', handleWindowMessage);
+        return () => window.removeEventListener('message', handleWindowMessage);
+    }, []);
+
     const startRecording = async () => {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -183,6 +199,26 @@ export default function ChatPage() {
         }
     };
 
+    const iframeRef = useRef<HTMLIFrameElement>(null);
+    const lastPortalMsgRef = useRef<any>(null);
+
+    const sendPortalMessage = (msg: any) => {
+        lastPortalMsgRef.current = msg;
+        const iframe = iframeRef.current || (document.querySelector('iframe') as HTMLIFrameElement);
+        if (iframe && iframe.contentWindow) {
+            iframe.contentWindow.postMessage(msg, '*');
+        }
+    };
+
+    const handleIframeLoad = () => {
+        if (lastPortalMsgRef.current) {
+            const iframe = iframeRef.current || (document.querySelector('iframe') as HTMLIFrameElement);
+            if (iframe && iframe.contentWindow) {
+                iframe.contentWindow.postMessage(lastPortalMsgRef.current, '*');
+            }
+        }
+    };
+
     const handleSendMessage = async (e: React.FormEvent) => {
         e.preventDefault();
         if ((!input.trim() && selectedFiles.length === 0) || isLoading) return;
@@ -198,18 +234,15 @@ export default function ChatPage() {
             // If files are sent, we are likely applying. Show portal.
             setShowPortal(true);
 
-            // Trigger visual auto-fill in the dummy website preview
-            setTimeout(() => {
-                fetch(`${API_BASE_URL}/api/profile/${userPhone || "9876543210"}`)
-                    .then(res => res.json())
-                    .then(profile => {
-                        const iframe = document.querySelector('iframe');
-                        if (iframe && iframe.contentWindow) {
-                            iframe.contentWindow.postMessage({ type: 'AUTO_FILL', payload: profile }, '*');
-                        }
-                    })
-                    .catch(e => console.error("Could not fetch profile for preview auto-fill", e));
-            }, 1000);
+            // Fetch initial profile for instant preview auto-fill while backend processes OCR
+            fetch(`${API_BASE_URL}/api/profile/${userPhone || "9876543210"}`)
+                .then(res => res.json())
+                .then(profile => {
+                    if (profile && !profile.detail) {
+                        sendPortalMessage({ type: 'AUTO_FILL', payload: profile });
+                    }
+                })
+                .catch(e => console.error("Could not fetch profile for preview auto-fill", e));
         }
 
         setMessages(prev => [...prev, { role: 'user', content: displayContent }, { role: 'assistant', content: '' }]);
@@ -245,18 +278,20 @@ export default function ChatPage() {
                 if (data.required_docs) setRequiredDocs(data.required_docs);
 
                 // Show portal if an action is required or taking place
-                if (data.action === 'upload_documents' || data.status === 'success') {
+                if (data.action === 'upload_documents' || data.status === 'success' || data.user_data) {
                     setShowPortal(true);
                 }
 
-                if (data.status === 'success') {
-                    // Trigger the final submission animation in the preview
-                    setTimeout(() => {
-                        const iframe = document.querySelector('iframe');
-                        if (iframe && iframe.contentWindow) {
-                            iframe.contentWindow.postMessage({ type: 'AUTO_SUBMIT' }, '*');
-                        }
-                    }, 500);
+                if (data.status === 'success' || data.user_data) {
+                    const portalMsg = {
+                        type: 'AUTO_FILL_AND_SUBMIT',
+                        payload: data.user_data || {},
+                        ref_number: data.ref_number
+                    };
+                    
+                    sendPortalMessage(portalMsg);
+                    setTimeout(() => sendPortalMessage(portalMsg), 400);
+                    setTimeout(() => sendPortalMessage(portalMsg), 1200);
                 }
 
                 setMessages(prev => {
@@ -449,7 +484,9 @@ export default function ChatPage() {
                     <div className="w-[45%] h-[calc(100vh-80px)] border-l-4 border-slate-100 bg-slate-50 animate-in slide-in-from-right duration-500 overflow-hidden">
                         <div className="h-full w-full relative">
                             <iframe
+                                ref={iframeRef}
                                 src={portalUrl}
+                                onLoad={handleIframeLoad}
                                 className="w-full h-full border-none"
                                 title="Government Portal"
                             />

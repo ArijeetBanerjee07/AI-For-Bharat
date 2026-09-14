@@ -567,20 +567,33 @@ async def voice_agent_orchestrator(
     3. Response Text -> Audio
     4. Return Text + Audio
     """
-    # 1. Save temp audio
-    ext = audio.filename.split(".")[-1] if audio.filename else "wav"
-    temp_audio_path = f"temp_voice_{uuid.uuid4()}.{ext}"
+    # 1. Read audio bytes and detect format safely
     try:
-        with open(temp_audio_path, "wb") as buffer:
-            shutil.copyfileobj(audio.file, buffer)
+        audio_content = await audio.read()
+        filename = audio.filename or "voice.webm"
+        mime_type = "audio/webm"
+        
+        if audio_content.startswith(b'RIFF'):
+            filename = "voice.wav"
+            mime_type = "audio/wav"
+        elif audio_content.startswith(b'\x1aE\xdf\xa3'):
+            filename = "voice.webm"
+            mime_type = "audio/webm"
+        elif audio_content.startswith(b'ID3') or (len(audio_content) > 2 and audio_content[:2] in (b'\xff\xfb', b'\xff\xf3')):
+            filename = "voice.mp3"
+            mime_type = "audio/mp3"
             
-        # 2. Transcribe (STT) - using saarika:v2.5 which supports direct webm processing
-        with open(temp_audio_path, "rb") as f:
+        # 2. Transcribe (STT) - using saarika:v2.5 with explicit file tuple
+        try:
             stt_response = sarvam_client.speech_to_text.transcribe(
-                file=f,
+                file=(filename, audio_content, mime_type),
                 model="saarika:v2.5"
             )
-        user_text = getattr(stt_response, "transcript", None) or getattr(stt_response, "transcription", "")
+            user_text = getattr(stt_response, "transcript", None) or getattr(stt_response, "transcription", "")
+        except Exception as stt_err:
+            print(f"⚠️ Sarvam STT transcribe error: {stt_err}")
+            user_text = ""
+
         print(f"🎙️ Voice Transcript: {user_text}")
 
         if not user_text or user_text.strip() == "":
@@ -623,7 +636,7 @@ async def voice_agent_orchestrator(
 
             agent_text = ""
             # Try Groq models first, with fallback to Sarvam LLM
-            for groq_model in ["groq/compound", "qwen/qwen3.6-27b", "llama-3.3-70b-versatile"]:
+            for groq_model in ["llama-3.3-70b-versatile", "qwen/qwen3.6-27b", "llama3-70b-8192"]:
                 try:
                     chat_response = groq_client.chat.completions.create(
                         model=groq_model,
@@ -1176,7 +1189,10 @@ CRITICAL RULES:
             "intent": "apply",
             "status": submission_result["status"],
             "scheme": scheme["name"],
+            "scheme_id": detected_scheme,
             "response": response_text,
+            "user_data": user_data,
+            "ref_number": submission_result.get("ref_number"),
             "error_detail": submission_result.get("message") if submission_result["status"] != "success" else None
         }
 
