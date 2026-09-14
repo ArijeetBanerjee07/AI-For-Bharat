@@ -262,17 +262,23 @@ export default function ChatPage() {
                 const reader = response.body?.getReader();
                 const decoder = new TextDecoder();
                 let accumulated = '';
+                let streamBuffer = '';
                 if (!reader) return;
 
                 while (true) {
                     const { value, done } = await reader.read();
                     if (done) break;
-                    const chunk = decoder.decode(value);
-                    const lines = chunk.split('\n');
-                    for (const line of lines) {
+                    streamBuffer += decoder.decode(value, { stream: true });
+                    const lines = streamBuffer.split('\n');
+                    streamBuffer = lines.pop() || ''; // keep trailing incomplete line
+
+                    for (const rawLine of lines) {
+                        const line = rawLine.trim();
                         if (line.startsWith('data: ')) {
+                            const payload = line.slice(6).trim();
+                            if (payload === '[DONE]') continue;
                             try {
-                                const data = JSON.parse(line.slice(6));
+                                const data = JSON.parse(payload);
                                 if (data.error) {
                                     accumulated += `\n\n⚠️ ${data.error}`;
                                     setMessages(prev => {

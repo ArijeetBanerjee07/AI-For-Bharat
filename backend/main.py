@@ -1,3 +1,4 @@
+import sys
 import os
 import json
 import httpx
@@ -6,12 +7,24 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import StreamingResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
+
+dotenv_file = find_dotenv()
+if dotenv_file:
+    load_dotenv(dotenv_file)
+else:
+    load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 from submission_agent import validate_document_with_sarvam, submit_to_portal_agent
 import shutil
 import uuid
 import asyncio
 import uvicorn
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 
 from pinecone import Pinecone
 from sarvamai import SarvamAI
@@ -101,7 +114,7 @@ print("Pinecone Database connected!")
 # Helper Functions
 # ---------------------------------------------------------
 
-def high_quality_search(query, top_n=5):
+def high_quality_search(query, top_n=3):
     # Step 1: Semantic Search (fetch_k results)
     # ⚡ Use Pinecone Serverless Inference (Cloud-based thinking)
     try:
@@ -125,14 +138,25 @@ def high_quality_search(query, top_n=5):
     if not results.matches:
         return []
         
-    return [match.metadata.get('content', '') for match in results.matches if match.metadata]
+    extracted = [match.metadata.get('content', '')[:1000] for match in results.matches if match.metadata]
+    return extracted
 
-async def async_high_quality_search(query, top_n=5):
+async def async_high_quality_search(query, top_n=3):
     import asyncio
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, high_quality_search, query, top_n)
 
+def clean_llm_text(text: str) -> str:
+    if not text:
+        return ""
+    if "</think>" in text:
+        text = text.split("</think>")[-1]
+    elif "<think>" in text:
+        text = text.split("<think>")[0]
+    return text.strip()
+
 async def get_sarvam_stream(system_prompt: str, user_query: str):
+    content = ""
     try:
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
@@ -145,14 +169,46 @@ async def get_sarvam_stream(system_prompt: str, user_query: str):
                 ]
             )
         )
-        content = response.choices[0].message.content
-        if content:
-            yield f"data: {json.dumps({'content': content})}\n\n"
-        yield "data: [DONE]\n\n"
+        if response and hasattr(response, 'choices') and len(response.choices) > 0:
+            content = response.choices[0].message.content or ""
     except Exception as e:
-        print(f"❌ Sarvam Stream Error: {e}")
-        yield f"data: {json.dumps({'error': f'Sarvam API Error: {str(e)}'})}\n\n"
-        yield "data: [DONE]\n\n"
+        print(f"⚠️ Sarvam Stream Error: {type(e)} - {e}. Attempting fallback to Groq...")
+
+    if not content:
+        # Fallback to Groq LLM with models supported on this account
+        for groq_model in ["qwen/qwen3.6-27b", "openai/gpt-oss-20b", "groq/compound-mini"]:
+            try:
+                loop = asyncio.get_event_loop()
+                groq_response = await loop.run_in_executor(
+                    None,
+                    lambda: groq_client.chat.completions.create(
+                        model=groq_model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_query}
+                        ],
+                        temperature=0.7,
+                        max_tokens=800
+                    )
+                )
+                if groq_response and groq_response.choices:
+                    content = groq_response.choices[0].message.content or ""
+                    if content:
+                        break
+            except Exception as g_err:
+                print(f"⚠️ Groq stream fallback model {groq_model} failed: {type(g_err)} - {g_err}")
+
+    content = clean_llm_text(content)
+
+    if content:
+        yield f"data: {json.dumps({'content': content}, ensure_ascii=False)}\n\n"
+    else:
+        yield f"data: {json.dumps({'error': 'Failed to generate LLM response from primary and fallback models.'})}\n\n"
+
+    yield "data: [DONE]\n\n"
+
+
+
 
 
 # ---------------------------------------------------------
@@ -526,16 +582,40 @@ async def voice_agent_orchestrator(
             - Keep the tone very polite, helpful, and natural (like a human talking on the phone).
             - Do not use markdown (no **bold**, no *italics*, no bullet points like -, *, 1. 2. 3.) because this text will be directly spoken by a Text-to-Speech voice engine. Use natural pauses and commas."""
 
-            chat_response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": voice_system_prompt},
-                    {"role": "user", "content": user_text}
-                ],
-                temperature=0.7,
-                max_tokens=600
-            )
-            agent_text = chat_response.choices[0].message.content
+            agent_text = ""
+            # Try Groq models first, with fallback to Sarvam LLM
+            for groq_model in ["groq/compound", "qwen/qwen3.6-27b", "llama-3.3-70b-versatile"]:
+                try:
+                    chat_response = groq_client.chat.completions.create(
+                        model=groq_model,
+                        messages=[
+                            {"role": "system", "content": voice_system_prompt},
+                            {"role": "user", "content": user_text}
+                        ],
+                        temperature=0.7,
+                        max_tokens=600
+                    )
+                    agent_text = chat_response.choices[0].message.content
+                    if agent_text:
+                        break
+                except Exception as g_err:
+                    print(f"⚠️ Groq model {groq_model} failed: {g_err}")
+
+            if not agent_text:
+                try:
+                    print("🔄 Falling back to Sarvam AI LLM for voice agent response...")
+                    sarvam_resp = sarvam_client.chat.completions(
+                        model='sarvam-105b',
+                        messages=[
+                            {"role": "system", "content": voice_system_prompt},
+                            {"role": "user", "content": user_text}
+                        ]
+                    )
+                    agent_text = sarvam_resp.choices[0].message.content
+                except Exception as s_err:
+                    print(f"❌ Sarvam AI LLM fallback failed: {s_err}")
+                    agent_text = "Main Yojana-Setu se aapki madad ke liye taiyar hoon. Kripya apna sawal puchein."
+
 
         # 4. Text-to-Speech (Dynamic Language Detection)
         # Use regex to detect if there are Hindi (Devanagari) characters
