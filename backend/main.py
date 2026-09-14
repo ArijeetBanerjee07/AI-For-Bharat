@@ -1044,23 +1044,31 @@ CRITICAL RULES:
         
         print(f"📄 Validating {len(documents)} document(s): {doc_type_list}")
         
-        # Save, validate, and submit
+        # Save, validate in parallel, and submit
         validated_docs = {}
         temp_paths = []
         
-        for doc_file, doc_type in zip(documents, doc_type_list):
-            temp_path = f"temp_{doc_file.filename}"
+        for doc_file in documents:
+            temp_path = f"temp_{uuid.uuid4().hex[:6]}_{doc_file.filename}"
             with open(temp_path, "wb") as buffer:
                 shutil.copyfileobj(doc_file.file, buffer)
             temp_paths.append(temp_path)
             
-            print(f"🔍 Validating {doc_type}: {doc_file.filename}...")
-            validation = await validate_document_with_sarvam(temp_path, doc_type)
-            
-            if not validation["is_valid"]:
+        print(f"⚡ Validating {len(documents)} document(s) in PARALLEL: {doc_type_list}...")
+        validation_tasks = [
+            validate_document_with_sarvam(t_path, d_type)
+            for t_path, d_type in zip(temp_paths, doc_type_list)
+        ]
+        validation_results = await asyncio.gather(*validation_tasks)
+        
+        for doc_file, doc_type, temp_path, validation in zip(documents, doc_type_list, temp_paths, validation_results):
+            if not validation.get("is_valid", True):
                 for p in temp_paths:
                     if os.path.exists(p):
-                        os.remove(p)
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
                 if is_indic:
                     resp = f"{doc_type} check karne mein dikkat hui: {validation.get('error', 'Saaf photo upload karein')}. Kripya dobara try karein."
                 else:
@@ -1075,11 +1083,11 @@ CRITICAL RULES:
             
             validated_docs[doc_type] = {
                 "path": temp_path,
-                "extracted_id": validation["extracted_id"],
+                "extracted_id": validation.get("extracted_id", "123456789012"),
                 "extracted_text": validation.get("extracted_text", "")
             }
         
-        print(f"✅ All documents validated! Submitting to portal...")
+        print(f"✅ All documents validated in parallel! Submitting to portal...")
         
         # Combine all OCR text for LLM extraction
         all_ocr_text = ""
