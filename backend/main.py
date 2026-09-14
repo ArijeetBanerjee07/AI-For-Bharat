@@ -336,7 +336,7 @@ async def process_submission(
         Sign off: Team Yojana Setu."""
 
     # 5. Generate final conversational response
-    chat_response = sarvam_client.chat.completions(model='sarvam-30b', 
+    chat_response = sarvam_client.chat.completions(model='sarvam-105b', 
         messages=[{"role": "user", "content": system_prompt}]
     )
     agent_response_text = chat_response.choices[0].message.content
@@ -382,7 +382,7 @@ Examples:
 - "What documents do I need?" → {{"intent": "query", "scheme_id": null}}
 - "Submit my application for Jan Dhan" → {{"intent": "apply", "scheme_id": "pmjdy"}}"""
 
-    response = sarvam_client.chat.completions(model='sarvam-30b', 
+    response = sarvam_client.chat.completions(model='sarvam-105b', 
         messages=[{"role": "user", "content": prompt}]
     )
     
@@ -441,7 +441,7 @@ Text:
 '''
 """
     try:
-        response = sarvam_client.chat.completions(model='sarvam-30b', 
+        response = sarvam_client.chat.completions(model='sarvam-105b', 
             messages=[{"role": "user", "content": prompt}]
         )
         raw = response.choices[0].message.content.strip()
@@ -644,7 +644,7 @@ async def ivr_handle_speech(request: Request):
         - Keep the answer SHORT (2-3 sentences max) since this is a phone call.
         - Be warm and helpful. End by asking if they have more questions."""
 
-        chat_response = sarvam_client.chat.completions(model='sarvam-30b', 
+        chat_response = sarvam_client.chat.completions(model='sarvam-105b', 
             messages=[
                 {"role": "system", "content": ivr_prompt},
                 {"role": "user", "content": speech_result}
@@ -937,7 +937,7 @@ Do not use jargon. Be warm and encouraging."""
             Sign off: Team Yojana Setu."""
 
         try:
-            chat_response = sarvam_client.chat.completions(model='sarvam-30b', 
+            chat_response = sarvam_client.chat.completions(model='sarvam-105b', 
                 messages=[{"role": "user", "content": llm_prompt}]
             )
             response_text = chat_response.choices[0].message.content
@@ -1077,7 +1077,7 @@ async def apply_for_scheme(
         Application failed: '{submission_result["message"]}'.
         Inform {user_name}. Sign off: Team Yojana Setu."""
 
-    chat_response = sarvam_client.chat.completions(model='sarvam-30b', 
+    chat_response = sarvam_client.chat.completions(model='sarvam-105b', 
         messages=[{"role": "user", "content": system_prompt}]
     )
     
