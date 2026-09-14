@@ -273,6 +273,14 @@ export default function ChatPage() {
                         if (line.startsWith('data: ')) {
                             try {
                                 const data = JSON.parse(line.slice(6));
+                                if (data.error) {
+                                    accumulated += `\n\n⚠️ ${data.error}`;
+                                    setMessages(prev => {
+                                        const newMessages = [...prev];
+                                        newMessages[newMessages.length - 1] = { role: 'assistant', content: accumulated.trim() };
+                                        return newMessages;
+                                    });
+                                }
                                 if (data.content) {
                                     accumulated += data.content;
                                     setMessages(prev => {

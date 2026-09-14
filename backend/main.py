@@ -139,7 +139,7 @@ async def get_sarvam_stream(system_prompt: str, user_query: str):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "sarvam-m",
+        "model": "sarvam-105b",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_query}
