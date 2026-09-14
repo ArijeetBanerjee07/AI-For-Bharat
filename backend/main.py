@@ -133,46 +133,27 @@ async def async_high_quality_search(query, top_n=5):
     return await loop.run_in_executor(None, high_quality_search, query, top_n)
 
 async def get_sarvam_stream(system_prompt: str, user_query: str):
-    url = "https://api.sarvam.ai/v1/chat/completions"
-    headers = {
-        "api-subscription-key": os.getenv("SARVAM_API_KEY", ""),
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "sarvam-105b",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_query}
-        ],
-        "stream": True
-    }
-    
-    async with httpx.AsyncClient() as client:
-        # Use httpx to stream the Sarvam LLM response back
-        async with client.stream("POST", url, headers=headers, json=payload, timeout=60.0) as response:
-            if response.status_code != 200:
-                error_body = await response.aread()
-                # Yield error to frontend in case auth or LLM fails
-                yield f"data: {json.dumps({'error': f'Sarvam API Error: {response.status_code} - {error_body.decode()}'})}\n\n"
-                yield "data: [DONE]\n\n"
-                return
-                
-            async for line in response.aiter_lines():
-                if line.startswith("data:"):
-                    data_str = line[5:].strip()
-                    if data_str == "[DONE]":
-                        yield "data: [DONE]\n\n"
-                        break
-                    if not data_str:
-                        continue
-                    try:
-                        data = json.loads(data_str)
-                        if "choices" in data and len(data["choices"]) > 0:
-                            content = data["choices"][0].get("delta", {}).get("content")
-                            if content:
-                                yield f"data: {json.dumps({'content': content})}\n\n"
-                    except json.JSONDecodeError:
-                        pass
+    try:
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: sarvam_client.chat.completions(
+                model='sarvam-105b',
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_query}
+                ]
+            )
+        )
+        content = response.choices[0].message.content
+        if content:
+            yield f"data: {json.dumps({'content': content})}\n\n"
+        yield "data: [DONE]\n\n"
+    except Exception as e:
+        print(f"❌ Sarvam Stream Error: {e}")
+        yield f"data: {json.dumps({'error': f'Sarvam API Error: {str(e)}'})}\n\n"
+        yield "data: [DONE]\n\n"
+
 
 # ---------------------------------------------------------
 # API Endpoints
