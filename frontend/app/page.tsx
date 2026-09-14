@@ -25,21 +25,36 @@ export default function Dashboard() {
   useEffect(() => {
     const name = localStorage.getItem('user_name');
     const phone = localStorage.getItem('user_phone');
+    console.log('🔍 Dashboard loaded - user_name:', name, 'user_phone:', phone);
+    
     if (name && phone) {
       setUserName(name);
       setUserPhone(phone);
 
       // Fetch user's past chats/applications
+      console.log(`📡 Fetching sessions for phone: ${phone}`);
       fetch(`${API_BASE_URL}/api/chat/sessions/${phone}`)
-        .then(res => res.json())
+        .then(res => {
+          console.log('📡 API Response status:', res.status);
+          return res.json();
+        })
         .then(data => {
+          console.log('📡 API Response data:', data);
           if (Array.isArray(data)) {
+            console.log(`✅ Found ${data.length} sessions`);
             setApplications(data);
+          } else {
+            console.log('⚠️ API returned non-array data:', typeof data);
+            setApplications([]);
           }
         })
-        .catch(err => console.error("Error fetching sessions:", err));
+        .catch(err => {
+          console.error("❌ Error fetching sessions:", err);
+          setApplications([]);
+        });
     } else {
       // Force redirect to login if not authenticated
+      console.log('⚠️ No user info found, redirecting to login');
       router.push('/login');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

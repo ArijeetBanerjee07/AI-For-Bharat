@@ -51,14 +51,20 @@ class StorageService:
 
     def get_user_sessions(self, user_id):
         """Retrieves all chat sessions for a specific user."""
+        print(f"🔍 Fetching sessions for user_id: {user_id}")
+        print(f"   Memory sessions total: {len(self.memory_sessions)}")
+        
         if self.sessions_table:
             try:
-                from boto3.dynamodb.conditions import Attr
-                response = self.sessions_table.scan(
-                    FilterExpression=Attr('user_id').eq(user_id)
+                from boto3.dynamodb.conditions import Key
+                # Use GSI for efficient querying by user_id
+                response = self.sessions_table.query(
+                    IndexName='user_id_updated_at_index',
+                    KeyConditionExpression=Key('user_id').eq(user_id),
+                    ScanIndexForward=False  # Sort by updated_at descending
                 )
                 items = response.get('Items', [])
-                items.sort(key=lambda x: x.get('updated_at', ''), reverse=True)
+                print(f"✅ Retrieved {len(items)} sessions from DynamoDB for user {user_id}")
                 return items
             except Exception as e:
                 print(f"⚠️ DynamoDB get_user_sessions error: {e}. Using memory fallback.")
@@ -66,6 +72,8 @@ class StorageService:
         # Memory fallback
         user_sess = [s for s in self.memory_sessions.values() if s.get('user_id') == user_id]
         user_sess.sort(key=lambda x: x.get('updated_at', ''), reverse=True)
+        print(f"✅ Retrieved {len(user_sess)} sessions from memory for user {user_id}")
+        print(f"   Sessions: {[s.get('title') for s in user_sess]}")
         return user_sess
 
     def get_session_messages(self, session_id):
@@ -91,6 +99,8 @@ class StorageService:
         """Saves a chat message and updates session metadata."""
         now = datetime.now().isoformat()
         message_id = f"{session_id}_{int(time.time() * 1000)}"
+        
+        print(f"💾 Saving message: session_id={session_id}, user_id={user_id}, role={role}, title={title[:30]}...")
 
         # Memory save (always update memory as cache)
         self.memory_sessions[session_id] = {
@@ -108,6 +118,7 @@ class StorageService:
             'content': content,
             'message_id': message_id
         })
+        print(f"✅ Message saved to memory. Total sessions in memory: {len(self.memory_sessions)}")
 
         if self.sessions_table and self.messages_table:
             try:
@@ -128,6 +139,7 @@ class StorageService:
                         'message_id': message_id
                     }
                 )
+                print(f"✅ Message saved to DynamoDB")
             except Exception as e:
                 print(f"⚠️ DynamoDB save_chat_message warning: {e}. Message saved to in-memory fallback.")
 

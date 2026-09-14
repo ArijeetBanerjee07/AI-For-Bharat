@@ -41,21 +41,25 @@ export default function ChatPage() {
         const phone = localStorage.getItem('user_phone');
         const name = localStorage.getItem('user_name');
         const fallbackName = name ? name : "Guest";
+        
+        console.log('💬 Chat page loaded - phone:', phone, 'name:', name);
 
         const params = new URLSearchParams(window.location.search);
         let currentSessionId = params.get('session_id');
 
         const welcomeMessage: Message = {
             role: 'assistant',
-            content: `Namaste ${fallbackName}! Main Yojana-Setu AI hoon. Main aapki sarkari yojanaon ke baare mein jaankari dene aur aavedan (apply) karne mein madad kar sakta hoon.`
+            content: `Namasta ${fallbackName}! Main Yojana-Setu AI hoon. Main aapki sarkari yojanaon ke baare mein jaankari dene aur aavedan (apply) karne mein madad kar sakta hoon.`
         };
 
         if (!currentSessionId) {
             currentSessionId = `sess_${Math.random().toString(36).substring(2, 9)}_${Date.now()}`;
+            console.log('🆕 New session created:', currentSessionId);
             setSessionId(currentSessionId);
             setMessages([welcomeMessage]);
             router.replace(`/chat?session_id=${currentSessionId}`);
         } else {
+            console.log('📂 Existing session found:', currentSessionId);
             setSessionId(currentSessionId);
             // Fetch existing messages
             fetch(`${API_BASE_URL}/api/chat/messages/${currentSessionId}`)
@@ -65,14 +69,16 @@ export default function ChatPage() {
                 })
                 .then(data => {
                     if (Array.isArray(data) && data.length > 0) {
+                        console.log('✅ Loaded', data.length, 'messages from session');
                         setMessages(data as Message[]);
                     } else {
                         // Empty session from DB, show welcome!
+                        console.log('📭 Empty session, showing welcome message');
                         setMessages([welcomeMessage]);
                     }
                 })
                 .catch(err => {
-                    console.error("Failed to load chat:", err);
+                    console.error("❌ Failed to load chat:", err);
                     setMessages([welcomeMessage]);
                 });
         }

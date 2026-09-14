@@ -1329,11 +1329,28 @@ async def get_profile(phone: str):
 
 @app.get("/api/chat/sessions/{user_id}")
 async def get_sessions(user_id: str):
-    return storage_service.get_user_sessions(user_id)
+    sessions = storage_service.get_user_sessions(user_id)
+    print(f"✅ Retrieved {len(sessions)} sessions for user_id: {user_id}")
+    return sessions
 
 @app.get("/api/chat/messages/{session_id}")
 async def get_messages(session_id: str):
     return storage_service.get_session_messages(session_id)
+
+@app.get("/api/debug/storage/{user_id}")
+async def debug_storage(user_id: str):
+    """Diagnostic endpoint to check storage state"""
+    return {
+        "user_id": user_id,
+        "memory_sessions_count": len(storage_service.memory_sessions),
+        "memory_messages_count": len(storage_service.memory_messages),
+        "user_sessions": storage_service.get_user_sessions(user_id),
+        "all_memory_sessions": [
+            {"session_id": sid, "user_id": s.get("user_id"), "title": s.get("title")}
+            for sid, s in storage_service.memory_sessions.items()
+        ],
+        "dynamodb_available": storage_service.sessions_table is not None
+    }
 
 @app.get("/mock-gov-portal")
 async def mock_portal():
